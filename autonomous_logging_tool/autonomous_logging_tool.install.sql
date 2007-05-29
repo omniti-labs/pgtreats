@@ -15,7 +15,7 @@ create table alt.job_log (
 create index job_log_job_name_idx on alt.job_log(job_name);
 create index job_log_start_time_idx on alt.job_log(start_time);
 
-create table alt.job_details (
+create table alt.job_detail (
     job_id bigint not null references alt.job_log(job_id),
     step_id bigserial not null,
     action text not null,
@@ -75,9 +75,9 @@ AS $$
 DECLARE
     v_step_id INTEGER;
 BEGIN
-    SELECT nextval('alt.job_details_step_id_seq') INTO v_step_id;
+    SELECT nextval('alt.job_detail_step_id_seq') INTO v_step_id;
 
-    INSERT INTO alt.job_details (job_id, step_id, action, start_time)
+    INSERT INTO alt.job_detail (job_id, step_id, action, start_time)
     VALUES (p_job_id, v_step_id, p_action, current_timestamp);
 
     RETURN v_step_id;
@@ -113,7 +113,7 @@ AS $$
 DECLARE
     v_numrows integer;
 BEGIN
-    UPDATE alt.job_details SET 
+    UPDATE alt.job_detail SET 
         end_time = current_timestamp,
         elapsed_time = date_part('epoch',now() - start_time)::integer,
         status = p_status,
