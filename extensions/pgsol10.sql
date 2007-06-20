@@ -16,8 +16,7 @@ CREATE TYPE _sol_map_data AS (
 
 CREATE OR REPLACE FUNCTION sol_pmap_pid(integer)
     RETURNS SETOF _sol_map_data
---    AS '$libdir/pgsol10', 'sol_pmap_pid'
-    AS '/home/jesus/pgsoltools/libpgsol10', 'sol_pmap_pid'
+    AS '/opt/pgsql823/lib/pgsol10', 'sol_pmap_pid'
     LANGUAGE C IMMUTABLE STRICT;
 
 CREATE OR REPLACE FUNCTION sol_memsizes_pid(in integer,
