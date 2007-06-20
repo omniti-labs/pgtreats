@@ -50,6 +50,10 @@
 #include "fmgr.h"
 #include "funcapi.h"
 
+#ifdef PG_MODULE_MAGIC
+PG_MODULE_MAGIC;
+#endif
+
 #define SOL_MAP_DATA_CNT 13
 #define	KILOBYTE	1024
 #define	MEGABYTE	(KILOBYTE * KILOBYTE)
