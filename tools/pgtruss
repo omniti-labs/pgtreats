@@ -1,0 +1,78 @@
+#!/opt/perl/bin/perl
+
+use strict;
+use DBI;
+use Getopt::Long;
+
+my %filecache;
+my %filerel;
+my %pgname;
+
+my $pid;
+my $verbose;
+my $stop;
+
+GetOptions(
+  "p=i" => \$pid,
+  "v"   => \$verbose,
+  "s"   => \$stop,
+);
+
+if(!$pid) {
+  print STDERR "$0 [-s] [-v] -p <pid>\n";
+  exit -1;
+}
+
+# -s implies -v
+$verbose = $stop if $stop;
+
+sub maprels {
+  my $cnt = 0;
+  print STDERR "Mapping open files to db objects...\n" if $verbose;
+  my $dbh = DBI->connect("dbi:Pg:dbname=pgods", "statsreader", "datamuncher");
+  my $sql = "SELECT relfilenode, relname FROM pg_class WHERE relfilenode IN (".
+                        join(',', values %filerel).")";
+  my $q = $dbh->prepare($sql);
+  $q->execute();
+  while(my($relfilenode, $relname) = $q->fetchrow()) {
+    $pgname{$relfilenode} = $relname;
+    print STDERR "$relfilenode => $relname\n" if $verbose;
+    $cnt++;
+  }
+  $q->finish();
+  $dbh->disconnect();
+  print STDERR "mapped $cnt files\n" if $verbose;
+}
+
+sub cache_files {
+  my $cnt = 0;
+  print STDERR "finding open files\n" if $verbose;
+  local($/) = undef;
+  open(PFILES, "pfiles $pid|");
+  my $pfiles = <PFILES>;
+  close(PFILES);
+
+# 135: S_IFREG mode:0600 dev:181,65543 ino:7834 uid:5432 gid:5432 size:1302528
+#      O_RDWR|O_LARGEFILE
+#      /pgods/slowdata1/pgdata/base/43516/803134
+
+  while($pfiles =~ m/^\s*(\d+):\s*S_IFREG.*?(?:O_\S+)\s*(\/\S+)/smg) {
+    my($fd, $path) = ($1, $2);
+    next if $path =~ /pg_xlog/;
+    $filecache{$fd} = $path;
+    ($filerel{$fd} = $path) =~ s/^.+\/(\d+).*/$1/;
+    $cnt++;
+  }
+  print STDERR "found $cnt files\n" if $verbose;
+  maprels();
+}
+
+cache_files();
+exit if $stop;
+
+open(TRUSS, "truss -p $pid 2>&1 |");
+while(<TRUSS>) {
+  s/^(read|write|lseek|close)\((\d+)/"$1(".($pgname{$filerel{$2}}||$2)/eg;
+  print;
+}
+close(TRUSS);

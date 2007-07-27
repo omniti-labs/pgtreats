@@ -1,0 +1,191 @@
+#!/opt/perl/bin/perl
+
+# Copyright 2006 OmniTI, Inc.
+# Author: Theo Schlossnagle
+# All rights reserved.
+
+use DBI;
+use Getopt::Long;
+use strict;
+
+my %oidcache;
+my %files;
+
+my $clear = `clear`;
+my $sortkey = "avg";
+my $topn = 40;
+my $interval = 5;
+my $database = 'postgres';
+my $user = $ENV{USER} || 'postgres';
+my $pass = '';
+my $others = 0;
+my $usage = 0;
+my @valid;
+
+GetOptions("n=i" => \$topn,
+           "i=i" => \$interval,
+           "s=s" => \$sortkey,
+           "d=s" => \$database,
+           "u=s" => \$user,
+           "p=s" => \$pass,
+           "o"   => \$others,
+           "h"   => \$usage);
+
+if($usage) {
+  print qq^
+$0:
+	-n #		display top # files/objects
+	-i #		report stats every # seconds
+	-s <key>	sort descending on <key> where <key> is:
+			((read|write):)?(cnt|min|avg|max)
+			default 'avg' (which is read:avg + write:avg)
+	-d <dbname>	connect the <dbname> postgres database
+	-u <user>	connect as <user> (default you)
+	-p <pass>	connect with <pass> (default '')
+	-o		display files other than database objects
+	-h		this message
+
+Copyright 2006 OmniTI, Inc.  All rights reserved.
+Distributable under a New-BSD license.
+^;
+  exit 0;
+}
+
+my $dbh;
+# Connect to PostgreSQL for mapping filenames to database objects
+$dbh = DBI->connect("dbi:Pg:dbname=$database", $user, $pass);
+
+# Find our tablespaces (files under these _could_ be DB objects
+my $q = $dbh->prepare(q^
+  select distinct(CASE spclocation
+                  WHEN ''
+                  THEN (select setting||'/base'
+                          from pg_settings
+                         where name = 'data_directory')
+                  ELSE spclocation END)
+    from pg_tablespace
+  ^);
+$q->execute();
+while(my ($base) = $q->fetchrow()) {
+  # Foreach of them make a regexp to match against filenames
+  $base = '^' . $base . '/(\d+)/(\d+)(?:\.\d+)?$';
+  push @valid, qr/$base/;
+}
+$q->finish;
+
+# Prep our oid to object name mapping query
+my $oid2name = $dbh->prepare(q^
+  select relname
+    from pg_class
+   where relfilenode = ?
+^);
+
+# Do the dtrace to report on statistics per filename
+open(D, q^/usr/sbin/dtrace -q -n '
+syscall::read:entry
+/execname == "postgres"/
+{
+ self->fd = arg0;
+ self->start = timestamp;
+}
+syscall::write:entry
+/execname == "postgres"/
+{
+ self->fd = arg0;
+ self->start = timestamp;
+}
+syscall:::return
+/self->start/
+{
+  @[probefunc, fds[self->fd].fi_pathname] =
+    avg((timestamp - self->start)/1000000);
+  @min[probefunc, fds[self->fd].fi_pathname] =
+    min((timestamp - self->start)/1000000);
+  @max[probefunc, fds[self->fd].fi_pathname] =
+    max((timestamp - self->start)/1000000);
+  @cnt[probefunc, fds[self->fd].fi_pathname] = count();
+  self->start = 0;
+}
+
+tick-^ . $interval . q^sec
+{
+  printa("avg:%@d:%s:%s\n", @);
+  printa("cnt:%@d:%s:%s\n", @cnt);
+  printa("min:%@d:%s:%s\n", @min);
+  printa("max:%@d:%s:%s\n", @max);
+  /* print a clear so that the reader knows to draw stuff */
+  printf("clear:0:0:0\n");
+  trunc(@);
+  trunc(@cnt);
+  trunc(@min);
+  trunc(@max);
+}
+'|^);
+
+
+my @vals = qw/read:cnt read:min read:avg read:max write:cnt write:min write:avg write:max/;
+
+# routine to draw out to the screen.
+sub display {
+  # Sort the list as requested.
+  my @filelist =
+    sort { $files{$b}->{$sortkey} <=> $files{$a}->{$sortkey} }
+      keys %files;
+
+  # limit to top n
+  splice(@filelist, $topn);
+
+  # print a header (yes, it is wide)
+  print "           FILENAME/DBOBJECT                       ".
+        "               READS                 WRITES      \n" .
+        "                                                   ".
+        "      #   min   avg   max     #   min   avg   max\n";
+
+  # run through each of our files and print stats.
+  foreach my $filename (@filelist) {
+    printf("%-50s   %5d %5d %5d %5d %5d %5d %5d %5d\n", 
+           substr($filename, -50),
+           map { $files{$filename}->{$_} } @vals);
+  }
+}
+
+# Map filenames to database object names and cache the answer in %oidcache
+
+sub map2pg {
+  my $file = shift;
+  foreach my $r (@valid) {
+    if($file =~ $r) {
+      my $name = $oidcache{$2};
+      unless($name) {
+        $oid2name->execute($2);
+        ($name) = $oid2name->fetchrow();
+        $oid2name->finish;
+        $oidcache{$2} = $name if($name);
+      }
+      return $name || "pg:$2";
+    }
+  }
+  # only return the original filename if -o is set
+  return $others?$file:undef;
+}
+
+while(<D>) {
+  # read out dtrace output
+  chomp;
+  my($attr,$v,$op,$file) = split /\:/;
+
+  # if it is a clear message, then clear, display and truncate stats
+  if($attr eq 'clear') {
+    print $clear; 
+    display();
+    %files = ();
+  }
+  # map the file, set the stats
+  else {
+    $file = map2pg($file);
+    if($file) {
+      $files{$file}->{"$op:$attr"} = $v;
+      $files{$file}->{"$attr"} += $v;
+    }
+  }
+}
