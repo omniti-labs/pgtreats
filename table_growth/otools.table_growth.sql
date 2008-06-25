@@ -5,6 +5,6 @@ CREATE TABLE otools.table_growth (
     actual_size numeric NOT NULL,
     growth_size numeric NOT NULL,
     sum_flag smallint NOT NULL,
-    capture_time timestamp without time zone NOT NULL
+    capture_time date NOT NULL
 );
 
