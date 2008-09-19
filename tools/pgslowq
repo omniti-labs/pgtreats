@@ -1,0 +1,69 @@
+#!/bin/sh
+QUANT_END=
+LOG=
+ZONE=
+DESTRUCTOR=
+STRSIZE=4096
+
+args=`getopt qs:t:wz: $*`
+if [ $? != 0 ]
+then
+  echo "$0 [-q] [-t #us] [-s len] [-w] [-z zone]"
+  echo
+  echo "	-q		quantize query runtimes."
+  echo "	-t		show queries over the specified # microseconds."
+  echo "	-s #		show len bytes of the query (default: 4096)."
+  echo "	-w		run destructively to work around DTrace bugs."
+  echo " 	-z zone		restrict to postgres running zone."
+  exit 2
+fi
+
+set -- $args
+for i
+do
+  case "$i"
+  in
+    -q)
+      QUANT_END='END { printa(@q); }'
+      shift;;
+    -s)
+      STRSIZE="$2"
+      shift;;
+    -t)
+      US=$2; shift;
+      LOG='postgres*:::statement-start
+           /self->starttime && timestamp > self->starttime &&
+            (timestamp - self->starttime) > (('"$US"') * 1000)/
+           {
+             printf("%s/%d (%dus)\n%s\n============================\n",
+                    zonename, pid, (timestamp - self->starttime)/1000,
+                    self->sql);
+           }'
+      shift;;
+    -w)
+      DESTRUCTOR="-w"
+      shift;;
+    -z)
+      ZONE="/zonename==\"$2\"/"; shift;
+      shift;;
+  esac
+done
+
+dtrace $DESTRUCTOR -q -n '
+#pragma D option strsize='"$STRSIZE"'
+self int starttime;
+self string sql;
+'"$LOG"'
+postgres*:::statement-start
+/self->starttime && timestamp > self->starttime/
+{
+  @q[zonename] = quantize((timestamp - self->starttime)/1000);
+}
+postgres*:::statement-start
+'"$ZONE"'
+{
+  self->sql = copyinstr(arg0);
+  self->starttime = (strstr(self->sql, "<IDLE>") == NULL) ? timestamp : 0;
+}
+'"$QUANT_END"
+
