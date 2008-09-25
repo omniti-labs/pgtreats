@@ -11,7 +11,7 @@ then
   echo "$0 [-q] [-t #us] [-s len] [-w] [-z zone]"
   echo
   echo "	-q		quantize query runtimes."
-  echo "	-t		show queries over the specified # microseconds."
+  echo "	-t		show queries over the specified # miliseconds."
   echo "	-s #		show len bytes of the query (default: 4096)."
   echo "	-w		run destructively to work around DTrace bugs."
   echo " 	-z zone		restrict to postgres running zone."
@@ -33,10 +33,10 @@ do
       US=$2; shift;
       LOG='postgres*:::statement-start
            /self->starttime && timestamp > self->starttime &&
-            (timestamp - self->starttime) > (('"$US"') * 1000)/
+            (timestamp - self->starttime) > (('"$US"') * 1000000)/
            {
-             printf("%s/%d (%dus)\n%s\n============================\n",
-                    zonename, pid, (timestamp - self->starttime)/1000,
+             printf("%s/%d (%dms)\n%s\n============================\n",
+                    zonename, pid, (timestamp - self->starttime)/1000000,
                     self->sql);
            }'
       shift;;
@@ -57,7 +57,7 @@ self string sql;
 postgres*:::statement-start
 /self->starttime && timestamp > self->starttime/
 {
-  @q[zonename] = quantize((timestamp - self->starttime)/1000);
+  @q[zonename] = quantize((timestamp - self->starttime)/1000000);
 }
 postgres*:::statement-start
 '"$ZONE"'
