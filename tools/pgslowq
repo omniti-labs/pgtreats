@@ -6,7 +6,7 @@ DESTRUCTOR=
 STRSIZE=4096
 
 args=`getopt qs:t:wz: $*`
-if [ $? != 0 ]
+if [ $? != 0 ] || [ $# -eq 0 ]  
 then
   echo "$0 [-q] [-t #us] [-s len] [-w] [-z zone]"
   echo
