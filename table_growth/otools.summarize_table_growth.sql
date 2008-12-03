@@ -24,7 +24,7 @@ IF to_char(current_date,'dd') = '01' THEN
     select a.table_owner, a.schema_name, a.table_name, max(actual_size), sum(growth_size), 2, (current_date - '1 month'::interval) 
     from otools.table_growth a 
     where sum_flag=1 and capture_time between (current_date - '1 month'::interval) and current_date 
-    group by table_owner, schema_name, table_name, actual_size;
+    group by table_owner, schema_name, table_name;
     -- now remove older rows
     delete from otools.table_growth where sum_flag = 1;
 END IF;
