@@ -1,0 +1,95 @@
+NAME 
+
+    pg_log - a set of scripts for reporting errors in postgres logs
+
+SYNOPSIS 
+
+    A set of config, text, and perl script to report errors in postgres logs.
+
+
+VERSION 
+
+    This document refers to version 0.1 of pg_log, released April 16th,
+    2009
+
+PREREQUISITE:
+
+   Installed Perl with MIME::Lite CPAN Module.
+
+USAGE 
+
+    To use pg_log, you need to change the postgresql.conf file to rotate logs 
+    everyday and postgres logs naming convention:
+
+        postgresql-YYYY-MM-DD.log
+
+    You can ignore static errors by putting them into static_ignore.dat file, 
+    For example:
+
+      canceling statement due to statement timeout 
+
+    You can ignore dyanmic errors by putting them into dynamic_ignore.dat file 
+    with ::DYN:: special string, For example:
+
+      syntax error at or near "::DYN::" at character ::DYN::
+
+    Make required adjustments to settings.conf file. Change ip-relays for 
+    email from your server and SCRIPT_DIR in pg_log_monitor.pl file.
+
+    Setup postgres cron to send out report everyday. 
+    
+    We typically setup the cron jobs to look like this:
+   
+    00 8 * * * /path/bin/perl /home/postgres/bin/pg_log/pg_log_monitor.pl -d
+    /data/pgdata/83/pg_log -i -ix -y -c 1>/dev/null
+
+HELP
+ 
+   $/path/to/perl/pg_log_monitor.pl -h    
+   Example Usage: pg_log_monitor.pl -d '/data/logs/pg_log' [option] [arg].
+
+   Required Options:
+     -d: Accepts an absolute path to the log directory to be analyzed.
+   Optional Flags:
+   -t: The timespan (in days) to analyze log files within. Default value is 2.
+   -i: Static ignore. Ignores static error messages stored in 'static_ignore.dat'.
+   -ix: Dynamic ignore. Ignores dynamic error message templates stored in 'dynamic_ignore.dat'.
+   -c: Run script in cron mode. Bypasses need for manual entry and e-mails errors to DBA team.
+   -y: Start checking from yesterday log file.
+   -h: Display help. Generates this message and exits script.
+
+BUGS AND LIMITATIONS :
+
+    The package is designed to work on single postgres logs location at a time, if 
+    you want to report multiple postgres logs location, you will need to schedule
+    seperate cron for each postgres logs loction. 
+
+    Please report any problems to denish@omniti.com.
+
+TODO 
+
+LICENSE AND COPYRIGHT 
+
+    Copyright (c) 2009 OmniTI, Inc.
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions are met:
+
+    1. Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+    2. Redistributions in binary form must reproduce the above copyright notice,
+     this list of conditions and the following disclaimer in the documentation
+     and/or other materials provided with the distribution.
+
+
+    THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED
+    WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+    MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
+    EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+    PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+    BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+    IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+    ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+    POSSIBILITY OF SUCH DAMAGE.
+
