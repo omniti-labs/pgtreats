@@ -124,3 +124,4 @@ exit
 # TODO
 # add flags for db connection options (dbname, port, host, etc...)
 # add flag for email address
+# add flag for logfile location
