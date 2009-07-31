@@ -35,6 +35,15 @@ sub send_report_by_mail {
     return unless $O->{ 'recipients' };
     return if ( !-s 'report.stdout' ) && ( !-s 'report.stderr' );
 
+    my $report = slurp_file( 'report.stdout' );
+    if (
+        ($report =~ m{^\(0\s+rows\)\s*\z}m) &&
+        (!$O->{'send-zero'})
+    ) {
+        log_info('Report contains 0 rows. Skipping mailing.');
+        return;
+    }
+
     my @recipients = map { my $q = $_; $q =~ s/\A\s*|\s*\z//; $q } split /\s*,\s*/, $O->{ 'recipients' };
 
     my $subject = strftime( $O->{ 'subject' }, localtime time );
@@ -56,7 +65,7 @@ sub send_report_by_mail {
         print $mailx "STDERR:\n" . slurp_file( 'report.stderr' ) . "\n";
     }
     if ( -s 'report.stdout' ) {
-        print $mailx "Report:\n" . slurp_file( 'report.stdout' ) . "\n";
+        print $mailx "Report:\n" . $report . "\n";
     }
     else {
         print $mailx "There is no report!\n";
@@ -270,6 +279,7 @@ sub get_options {
         'psql'           => 'psql',
         'mailx'          => 'mailx',
         'subject'        => '[%Y-%m-%d %H:%M:%S %z] Bloat report for __mode__ in __dbname__ at __host__:__port__',
+        'send-zero'      => undef,
     );
     show_help_and_die() unless GetOptions(
         \%o,
@@ -281,7 +291,7 @@ sub get_options {
         'dbname|d=s',
 
         # object choosing
-        'mode|m',
+        'mode|m=s',
         'schema|n=s',
         'exclude-schema|N=s',
         'relation-name|t=s',
@@ -296,6 +306,7 @@ sub get_options {
         # mailing 
         'recipients|r=s',
         'subject|s=s',
+        'send-zero|z',
 
         # other
         'help|?',
@@ -307,7 +318,7 @@ sub get_options {
 sub validate_options {
     $O->{ 'mode' } = 'tables'  if substr( 'tables',  0, length( $O->{ 'mode' } ) ) eq $O->{ 'mode' };    # make it tables for any prefix of 'tables'
     $O->{ 'mode' } = 'indexes' if substr( 'indexes', 0, length( $O->{ 'mode' } ) ) eq $O->{ 'mode' };    # make it indexes for any prefix of 'indexes'
-    show_help_and_die( 'Given mode (%) is invalid.', $O->{ 'mode' } ) unless $O->{ 'mode' } =~ m{\A(?:tables|indexes)\z};
+    show_help_and_die( 'Given mode (%s) is invalid.', $O->{ 'mode' } ) unless $O->{ 'mode' } =~ m{\A(?:tables|indexes)\z};
 
     for my $regexp_key ( qw( schema exclude-schema relation-name exclude-relation-name ) ) {
         next unless defined $O->{ $regexp_key };
@@ -387,6 +398,7 @@ Options:
   [ mailing ]
    --recipients            (-r) : comma separated list of emails that will get the report
    --subject               (-s) : subject of the mail to be sent with report
+   --send-zero             (-z) : if it is set $PROGRAM_NAME will send email even if there are no bloated relations.
 
   [ other ]
    --help                  (-?) : show this help page
