@@ -6,7 +6,7 @@ use English qw( -no_match_vars );
 use Getopt::Long;
 use Data::Dumper;
 use File::Basename;
-use File::Path qw( make_path );
+use File::Path;
 use File::Temp qw( tempdir );
 use POSIX qw( strftime );
 
@@ -23,6 +23,13 @@ send_report_by_mail();
 cleanup();
 
 exit;
+
+sub make_path {
+
+    $File::Path::VERSION =~ m{\A(\d+)} or die "File::Path::VERSION doesn't start with digits? : $File::Path::VERSION\n";
+    my $ver = $1;
+    return $ver < 2 ? File::Path::mkpath( @_ ) : File::Path::make_path( @_);
+}
 
 sub send_report_by_mail {
     return unless $O->{ 'recipients' };
