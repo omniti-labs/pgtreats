@@ -3,7 +3,7 @@ use strict;
 use warnings;
 use Carp;
 use English qw( -no_match_vars );
-use Getopt::Long;
+use Getopt::Long qw(:config no_ignore_case);
 use Data::Dumper;
 use File::Basename;
 use File::Path;
@@ -28,7 +28,7 @@ sub make_path {
 
     $File::Path::VERSION =~ m{\A(\d+)} or die "File::Path::VERSION doesn't start with digits? : $File::Path::VERSION\n";
     my $ver = $1;
-    return $ver < 2 ? File::Path::mkpath( @_ ) : File::Path::make_path( @_);
+    return $ver < 2 ? File::Path::mkpath( @_ ) : File::Path::make_path( @_ );
 }
 
 sub send_report_by_mail {
@@ -36,11 +36,10 @@ sub send_report_by_mail {
     return if ( !-s 'report.stdout' ) && ( !-s 'report.stderr' );
 
     my $report = slurp_file( 'report.stdout' );
-    if (
-        ($report =~ m{^\(0\s+rows\)\s*\z}m) &&
-        (!$O->{'send-zero'})
-    ) {
-        log_info('Report contains 0 rows. Skipping mailing.');
+    if (   ( $report =~ m{^\(0\s+rows\)\s*\z}m )
+        && ( !$O->{ 'send-zero' } ) )
+    {
+        log_info( 'Report contains 0 rows. Skipping mailing.' );
         return;
     }
 
@@ -159,6 +158,29 @@ sub get_report_sql {
     my $where_string = join ' AND ', @where_parts;
     $sql =~ s/__EXTRA__WHERE__/ WHERE $where_string /g;
 
+    return $sql if ( !$O->{ 'min-pages' } ) && ( !$O->{ 'min-wasted-pages' } );
+
+    my @pages_where = ();
+
+    if ( $O->{ 'min-pages' } ) {
+        if ( $O->{ 'mode' } eq 'tables' ) {
+            push @pages_where, 'relpages >= ' . $O->{ 'min-pages' };
+        }
+        else {
+            push @pages_where, 'ipages >= ' . $O->{ 'min-pages' };
+        }
+    }
+    if ( $O->{ 'min-wasted-pages' } ) {
+        if ( $O->{ 'mode' } eq 'tables' ) {
+            push @pages_where, 'wastedpages >= ' . $O->{ 'min-wasted-pages' };
+        }
+        else {
+            push @pages_where, 'wastedipages >= ' . $O->{ 'min-wasted-pages' };
+        }
+    }
+
+    $sql = "SELECT * FROM ( $sql ) as subquery WHERE " . join( ' AND ', @pages_where );
+
     return $sql;
 }
 
@@ -275,11 +297,11 @@ sub get_options {
     my %o = (
         'exclude-schema' => '^(pg_.*|information_schema)$',
         'logfile'        => '-',
+        'mailx'          => 'mailx',
         'mode'           => 'tables',
         'psql'           => 'psql',
-        'mailx'          => 'mailx',
-        'subject'        => '[%Y-%m-%d %H:%M:%S %z] Bloat report for __mode__ in __dbname__ at __host__:__port__',
         'send-zero'      => undef,
+        'subject'        => '[%Y-%m-%d %H:%M:%S %z] Bloat report for __mode__ in __dbname__ at __host__:__port__',
     );
     show_help_and_die() unless GetOptions(
         \%o,
@@ -296,6 +318,8 @@ sub get_options {
         'exclude-schema|N=s',
         'relation-name|t=s',
         'exclude-relation-name|T=s',
+        'min-pages|a=i',
+        'min-wasted-pages|A=i',
 
         # system options
         'logfile|l=s',
@@ -303,7 +327,7 @@ sub get_options {
         'psql|q=s',
         'mailx|x=s',
 
-        # mailing 
+        # mailing
         'recipients|r=s',
         'subject|s=s',
         'send-zero|z',
@@ -388,6 +412,8 @@ Options:
    --exclude-schema        (-N) : regexp to choose which schemas to skip from report
    --relation-name         (-t) : regexp to choose which relations to report on
    --exclude-relation-name (-T) : regexp to choose which relations should be excluded from report
+   --min-pages             (-a) : minimal number of pages object have to have to be on report
+   --min-wasted-pages      (-A) : minimal number of wasted pages object have to have to be on report
 
   [ system options ]
    --logfile               (-l) : where to log information about report execution
@@ -404,12 +430,14 @@ Options:
    --help                  (-?) : show this help page
 
 Defaults:
-   --exclude-schema '^(pg_.*|information_schema)\$'
-   --logfile        -
-   --mode           tables
-   --psql           psql
-   --mailx          mailx
-   --subject        [%Y-%m-%d %H:%M:%S %z] Bloat report for __mode__ in __dbname__ at __host__:__port__
+   --exclude-schema   '^(pg_.*|information_schema)\$'
+   --logfile          -
+   --mailx            mailx
+   --min-pages        0
+   --min-wasted-pages 0
+   --mode             tables
+   --psql             psql
+   --subject          [%Y-%m-%d %H:%M:%S %z] Bloat report for __mode__ in __dbname__ at __host__:__port__
 
 Notes:
     logfile, workdir and subject can contain strftime-styled %marks.
