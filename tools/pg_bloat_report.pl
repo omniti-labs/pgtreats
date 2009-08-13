@@ -31,12 +31,47 @@ sub make_path {
     return $ver < 2 ? File::Path::mkpath( @_ ) : File::Path::make_path( @_ );
 }
 
+sub reformat_report {
+    my $txt = shift;
+    my @rows = split /\r?\n/, $txt;
+    return ( 0, '(0 rows)' ) if 0 == scalar @rows;
+
+    my $template;
+    if ( $O->{ 'format' } eq 'simple' ) {
+        $template = "__[3u]i__. __[-60s]relation__ __[7u]wastedpages__ of __[7u]relpages__ pages wasted ( __pwastedbytes__ )\n";
+    }
+    else {
+        $template = "-- __[3u]i__. __[-60s]relation__ __[7u]wastedpages__ of __[7u]relpages__ pages wasted ( __pwastedbytes__ )\n";
+        if ( $O->{ 'mode' } eq 'tables' ) {
+            $template .= "CLUSTER __relation__; -- You might need to add: USING <some_index_name>\n\n";
+        }
+        else {
+            $template .= "REINDEX INDEX __relation__;\n\n";
+        }
+    }
+
+    my $report = '';
+    my $i      = 0;
+    for my $row ( @rows ) {
+        $i++;
+        my @columns = split /\|/, $row;
+        my %data;
+        @data{ qw( relation reltuples relpages otta bloat wastedpages wastedbytes pwastedbytes ) } = @columns;
+        $data{ "i" } = $i;
+        my $string = $template;
+        $string =~ s#__(?:\[(.*?)\])?([a-z]+)__#sprintf '%'.($1||'s'), $data{$2}||''#ge;
+        $report .= $string;
+    }
+    return ( scalar @rows, $report );
+}
+
 sub send_report_by_mail {
     return unless $O->{ 'recipients' };
     return if ( !-s 'report.stdout' ) && ( !-s 'report.stderr' );
 
     my $report = slurp_file( 'report.stdout' );
-    if (   ( $report =~ m{^\(0\s+rows\)\s*\z}m )
+    my ( $row_count, $reformatted ) = reformat_report( $report );
+    if (   ( 0 == $row_count )
         && ( !$O->{ 'send-zero' } ) )
     {
         log_info( 'Report contains 0 rows. Skipping mailing.' );
@@ -63,12 +98,7 @@ sub send_report_by_mail {
     if ( -s 'report.stderr' ) {
         print $mailx "STDERR:\n" . slurp_file( 'report.stderr' ) . "\n";
     }
-    if ( -s 'report.stdout' ) {
-        print $mailx "Report:\n" . $report . "\n";
-    }
-    else {
-        print $mailx "There is no report!\n";
-    }
+    print $mailx "Report:\n" . $reformatted . "\n";
     close $mailx;
 
     if ( -s 'mailx.stderr' ) {
@@ -103,6 +133,7 @@ sub run_report {
     push @command, '-p', $O->{ 'port' } if $O->{ 'port' };
     push @command, '-U', $O->{ 'user' } if $O->{ 'user' };
     push @command, '-f', 'report.sql';
+    push @command, '-qAt' unless $O->{ 'format' } eq 'table';
 
     my $command_string = join ' ', map { quotemeta $_ } @command;
     $command_string .= ' 2>report.stderr >report.stdout';
@@ -158,26 +189,12 @@ sub get_report_sql {
     my $where_string = join ' AND ', @where_parts;
     $sql =~ s/__EXTRA__WHERE__/ WHERE $where_string /g;
 
-    return $sql if ( !$O->{ 'min-pages' } ) && ( !$O->{ 'min-wasted-pages' } );
-
     my @pages_where = ();
 
-    if ( $O->{ 'min-pages' } ) {
-        if ( $O->{ 'mode' } eq 'tables' ) {
-            push @pages_where, 'relpages >= ' . $O->{ 'min-pages' };
-        }
-        else {
-            push @pages_where, 'ipages >= ' . $O->{ 'min-pages' };
-        }
-    }
-    if ( $O->{ 'min-wasted-pages' } ) {
-        if ( $O->{ 'mode' } eq 'tables' ) {
-            push @pages_where, 'wastedpages >= ' . $O->{ 'min-wasted-pages' };
-        }
-        else {
-            push @pages_where, 'wastedipages >= ' . $O->{ 'min-wasted-pages' };
-        }
-    }
+    push @pages_where, 'relpages >= ' . $O->{ 'min-pages' }           if $O->{ 'min-pages' };
+    push @pages_where, 'wastedpages >= ' . $O->{ 'min-wasted-pages' } if $O->{ 'min-wasted-pages' };
+
+    return $sql if 0 == scalar @pages_where;
 
     $sql = "SELECT * FROM ( $sql ) as subquery WHERE " . join( ' AND ', @pages_where );
 
@@ -195,7 +212,7 @@ sub get_base_sql {
         return q{
 SELECT
   schemaname||'.'||tablename as relation, reltuples::bigint, relpages::bigint, otta,
-  ROUND(CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages/otta::numeric END,1) AS tbloat,
+  ROUND(CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages/otta::numeric END,1) AS bloat,
   CASE WHEN relpages < otta THEN 0 ELSE relpages::bigint - otta END AS wastedpages,
   CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::bigint END AS wastedbytes,
   pg_size_pretty((CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::bigint END)::bigint) AS pwastedbytes
@@ -242,11 +259,11 @@ ORDER BY wastedbytes DESC
     else {
         return q{
 SELECT
-  schemaname||'.'||iname as relation,ituples::bigint, ipages::bigint, iotta,
-  ROUND(CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages/iotta::numeric END,1) AS ibloat,
-  CASE WHEN ipages < iotta THEN 0 ELSE ipages::bigint - iotta END AS wastedipages,
-  CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END AS wastedibytes,
-  pg_size_pretty((CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END)::bigint) AS pwastedisize
+  schemaname||'.'||iname as relation,ituples::bigint as reltuples, ipages::bigint as relpages, iotta as otta,
+  ROUND(CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages/iotta::numeric END,1) AS bloat,
+  CASE WHEN ipages < iotta THEN 0 ELSE ipages::bigint - iotta END AS wastedpages,
+  CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END AS wastedbytes,
+  pg_size_pretty((CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END)::bigint) AS pwastedbytes
 FROM (
   SELECT
     schemaname, tablename, cc.reltuples, cc.relpages, bs,
@@ -288,7 +305,7 @@ __EXTRA__WHERE__
 WHERE (sml.relpages - otta > 128 OR ipages - iotta > 128) 
   AND ROUND(CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages/iotta::numeric END,1) > 1.2 
   AND CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END > 1024 * 100 
-ORDER BY wastedibytes DESC
+ORDER BY wastedbytes DESC
         };
     }
 }
@@ -296,6 +313,7 @@ ORDER BY wastedibytes DESC
 sub get_options {
     my %o = (
         'exclude-schema' => '^(pg_.*|information_schema)$',
+        'format'         => 'table',
         'logfile'        => '-',
         'mailx'          => 'mailx',
         'mode'           => 'tables',
@@ -333,6 +351,7 @@ sub get_options {
         'send-zero|z',
 
         # other
+        'format|f=s',
         'help|?',
     );
     show_help_and_die() if $o{ 'help' };
@@ -385,6 +404,8 @@ sub validate_options {
     show_help_and_die( 'psql program name missing!' ) unless $O->{ 'psql' };
     show_help_and_die( 'mailx program name missing!' ) if ( !$O->{ 'mailx' } ) && ( $O->{ 'recipients' } );
 
+    show_help_and_dir( 'Bad format (%s) requsted!', $O->{ 'format' } ) unless $O->{ 'format' } =~ m{\A(?:table|simple|sql)\z};
+
     chdir $O->{ 'workdir' };
     return;
 }
@@ -427,10 +448,12 @@ Options:
    --send-zero             (-z) : if it is set $PROGRAM_NAME will send email even if there are no bloated relations.
 
   [ other ]
+   --format                (-f) : format of report (table, simple or sql)
    --help                  (-?) : show this help page
 
 Defaults:
    --exclude-schema   '^(pg_.*|information_schema)\$'
+   --format           table
    --logfile          -
    --mailx            mailx
    --min-pages        0
