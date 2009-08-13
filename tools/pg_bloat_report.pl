@@ -34,35 +34,34 @@ sub make_path {
 sub reformat_report {
     my $txt = shift;
     my @rows = split /\r?\n/, $txt;
-    return ( 0, '(0 rows)' ) if 0 == scalar @rows;
+    return(0, '(0 rows)') if 0 == scalar @rows;
 
     my $template;
-    if ( $O->{ 'format' } eq 'simple' ) {
-        $template = "__[3u]i__. __[-60s]relation__ __[7u]wastedpages__ of __[7u]relpages__ pages wasted ( __pwastedbytes__ )\n";
-    }
-    else {
-        $template = "-- __[3u]i__. __[-60s]relation__ __[7u]wastedpages__ of __[7u]relpages__ pages wasted ( __pwastedbytes__ )\n";
-        if ( $O->{ 'mode' } eq 'tables' ) {
+    if ($O->{'format'} eq 'simple') {
+        $template = "__[3u]i__. __[-60s]relation__ __[7u]wastedpages__ of __[7u]relpages__ pages wasted (__[.1f]percent__%), __pwastedbytes__ of __prelbytes__.\n";
+    } else {
+        $template = "-- __[3u]i__. __[-60s]relation__ __[7u]wastedpages__ of __[7u]relpages__ pages wasted (__[.1f]percent__%), __pwastedbytes__ of __prelbytes__.\n";
+        if ($O->{'mode'} eq 'tables') {
             $template .= "CLUSTER __relation__; -- You might need to add: USING <some_index_name>\n\n";
-        }
-        else {
+        } else {
             $template .= "REINDEX INDEX __relation__;\n\n";
         }
     }
 
     my $report = '';
-    my $i      = 0;
+    my $i = 0;
     for my $row ( @rows ) {
         $i++;
         my @columns = split /\|/, $row;
         my %data;
-        @data{ qw( relation reltuples relpages otta bloat wastedpages wastedbytes pwastedbytes ) } = @columns;
-        $data{ "i" } = $i;
+        @data{qw( relation reltuples relpages otta bloat wastedpages wastedbytes pwastedbytes relbytes prelbytes )} = @columns;
+        $data{ 'percent' } = 100 * $data{'wastedpages'} / $data{'relpages'};
+        $data{"i"} = $i;
         my $string = $template;
         $string =~ s#__(?:\[(.*?)\])?([a-z]+)__#sprintf '%'.($1||'s'), $data{$2}||''#ge;
         $report .= $string;
     }
-    return ( scalar @rows, $report );
+    return( scalar @rows, $report );
 }
 
 sub send_report_by_mail {
@@ -215,7 +214,9 @@ SELECT
   ROUND(CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages/otta::numeric END,1) AS bloat,
   CASE WHEN relpages < otta THEN 0 ELSE relpages::bigint - otta END AS wastedpages,
   CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::bigint END AS wastedbytes,
-  pg_size_pretty((CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::bigint END)::bigint) AS pwastedbytes
+  pg_size_pretty((CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::bigint END)::bigint) AS pwastedbytes,
+  bs*relpages::bigint as relbytes,
+  pg_size_pretty((bs*relpages::bigint)::bigint) as prelbytes
 FROM (
   SELECT
     schemaname, tablename, cc.reltuples, cc.relpages, bs,
@@ -263,7 +264,9 @@ SELECT
   ROUND(CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages/iotta::numeric END,1) AS bloat,
   CASE WHEN ipages < iotta THEN 0 ELSE ipages::bigint - iotta END AS wastedpages,
   CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END AS wastedbytes,
-  pg_size_pretty((CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END)::bigint) AS pwastedbytes
+  pg_size_pretty((CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END)::bigint) AS pwastedbytes,
+  bs*ipages::bigint as relbytes,
+  pg_size_pretty((bs*relpages::bigint)::bigint) as prelbytes
 FROM (
   SELECT
     schemaname, tablename, cc.reltuples, cc.relpages, bs,
