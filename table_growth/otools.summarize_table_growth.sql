@@ -8,7 +8,7 @@ begin
 -- Daily summarization
 IF to_char(current_date,'dd') <> '01' THEN
     insert into otools.table_growth (table_owner, schema_name, table_name, actual_size, growth_size, sum_flag, capture_time)
-    select a.table_owner, a.schema_name, a.table_name, a.actual_size, a.actual_size-coalesce(b.actual_size,0) AS table_growth, 1, a.capture_time
+    select a.table_owner, a.schema_name, a.table_name, a.actual_size, a.actual_size-coalesce(b.actual_size,a.actual_size) AS table_growth, 1, a.capture_time
     from otools.table_growth a 
         left join otools.table_growth b 
             on (a.table_owner=b.table_owner and a.table_name=b.table_name and a.schema_name=b.schema_name and b.capture_time = current_date -1) 
