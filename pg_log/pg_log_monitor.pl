@@ -10,6 +10,7 @@ BEGIN{
     $SERVER_HOSTNAME='';
     $TO_ADDRESS='';
     $FROM_ADDRESS='';
+    $ERROR_LINE_FLAGS='';
     $day = (localtime)[3];
     $month = (localtime)[4];
     $year = (localtime)[5];
@@ -36,6 +37,10 @@ BEGIN{
         }elsif($setting[0] =~ m/^to_address/){
             $TO_ADDRESS = $setting[1];
             chomp($TO_ADDRESS);
+        }elsif($setting[0] =~ m/^error_flags/){
+            chomp($setting[1]);
+            my @error_flags = split(',', $setting[1]);
+            $ERROR_LINE_FLAGS = join('|', @error_flags);
         }
     }
     
@@ -96,7 +101,7 @@ my @seen_error_msgs;
 
    #Populate array of all logfile path names, sorted in descending order
     opendir(FH, $directory);
-      my @file_list = grep(/\.log$/, readdir(FH));
+      my @file_list = grep(/^postgresql-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\.log$/, readdir(FH));
     closedir(FH);
     
     @file_list = sort {$b cmp $a} @file_list;
@@ -213,7 +218,7 @@ my @lines;
 
     while(my $line = <FH>){
        chomp($line);
-       ($error_message) = $line =~ m/ERROR\:\s*(.+)/;
+       (my $placeholder, $error_message) = $line =~ m/($ERROR_LINE_FLAGS)\:\s*(.+)/;
        if($error_message){
             $error_message =~ s/^\s+//;
             $error_message =~ s/\s+$//;
@@ -357,93 +362,159 @@ return @unique;
 
 sub generate_output{
 
-      ($report_date) = $logfile_1_path =~ m/(\d{4}-\d{2}-\d{2})\.log$/;
-         
-      $output  =  "\nReport For Date: $report_date\n";
-      $output .=  "Total New Unique Errors Found: ".@new;
-          if($static_ignore && $dynamic_ignore){
-              $output .= " (Minus Static & Dynamic Ignores)\n";
-          }
-          elsif($static_ignore){
-             $output .= " (Minus Static Ignores)\n";
-          }
-          elsif($dynamic_ignore){
-             $output .= " (Minus Dynamic Ignores)\n";
-          }
-          else{
-             $output .= "\n";
-          }     
-      $output .=  "Total Recurring Unique Errors: ".@recurring;
-       
-         if($static_ignore && $dynamic_ignore){
-             $output .= " (Minus Static & Dynamic Ignores)\n";
-         }
-         elsif($static_ignore){
-             $output .= " (Minus Static Ignores)\n";
-         }
-         elsif($dynamic_ignore){
-             $output .= " (Minus Dynamic Ignores)\n";
-         }
-         else{
-             $output .= "\n";
-         }    
+    ($report_date) = $logfile_1_path =~ m/(\d{4}-\d{2}-\d{2})\.log$/;
+    my @full_new_lines;
+    my @full_recurring_lines;
 
     if(scalar(@new) > 0){
-        $output .= "\nNew Errors: (including any duplicates)\n";
+        $output .= "\nNew Errors:\n";
         $output .= "--------------------------------------------------\n";    
-        my @full_new_lines;
-        
+       
         foreach $error (@new){
         
             $error = replace_special_chars($error);
         
             open(FH, '<', $logfile_1_path);
-
+            my $is_duplicate=0;
             while(my $rawline = <FH>){
+            $is_duplicate=0;
             chomp($rawline);
-                if($rawline =~ $error){
-                    push(@full_new_lines, $rawline);
-                }
-           }
+            if($rawline =~ $error){
+               foreach $full_line (@full_new_lines){
+                   if($full_line =~ $error){
+                      $is_duplicate=1;
+                   }
+               }
+               push(@full_new_lines, $rawline) unless $is_duplicate == 1;
+            }
+        }
            
            close(FH);
 
         }
-        
-        @full_new_lines = sort @full_new_lines;
+      
+        @full_new_lines = sort @full_new_lines;  
+        my $line_count = 0;
         foreach my $full_line (@full_new_lines){
+            $line_count++;
+            $output .= "[".$line_count."]\n";
             $output .= $full_line."\n";
+            open(FH, '<', $logfile_1_path);
+                while($line = <FH>){
+                    chomp($line);
+                    if($line !~ m/FATAL\:/){
+                    if($line eq $full_line){
+                        my $start_byte_count = tell FH;
+
+                        for(my $x = 1; $x <= 2; $x++){
+                           my $context_line = <FH>;
+                           if($context_line =~ m/$ERROR_LINE_FLAGS\:/){
+                              break; 
+                           }
+                           if($context_line =~ m/STATEMENT\:|HINT\:|DETAIL\:|CONTEXT\:|LOG\:/){
+                              $output .= $context_line;
+                           }
+                        }
+                        
+
+                        my $end_byte_count = tell FH;
+                        my $rewind_byte_count = -1 * ($end_byte_count - $start_byte_count);
+                        seek FH, $rewind_byte_count, 1;
+                    }
+                    }
+                }
+            close(FH);
         }
         
         
     }
 
     if(scalar(@recurring) > 0){
-        $output .= "\nRecurring Errors: (including any duplicates)\n";    
+        $output .= "\nRecurring Errors:\n";    
         $output .= "--------------------------------------------------\n";
-        my @full_recurring_lines;
-     
+    
         foreach $error (@recurring){
 
            open(FH, '<', $logfile_1_path);
 
             while(my $rawline = <FH>){
+            my $is_duplicate = 0;
             chomp($rawline);
             if($rawline =~ $error){
-                push(@full_recurring_lines, $rawline);
+                foreach $full_recurring (@full_recurring_lines){
+                     if($full_recurring =~ $error){
+                       $is_duplicate = 1; 
+                     }
+                }
+                push(@full_recurring_lines, $rawline) unless $is_duplicate == 1;
             }
-           }
+         }
            
-           close(FH);
+         close(FH);
 
         }
-        
-        @full_recurring_lines = sort @full_recurring_lines;
+       
+        @full_recurring_lines = sort @full_recurring_lines; 
+        $line_count = 0;
         foreach my $full_line (@full_recurring_lines){
+            $line_count++;
+            $output .= "[".$line_count."]\n";
             $output .= $full_line."\n";
+            open(FH, '<', $logfile_1_path);
+                while($line = <FH>){
+                    chomp($line);
+                    if($line eq $full_line){
+                        my $start_byte_count = tell FH;
+
+                        for(my $x = 1; $x <= 2; $x++){
+                           my $context_line = <FH>;
+                           if($context_line =~ m/$ERROR_LINE_FLAGS\:/){
+                              break; 
+                           } 
+                           if($context_line =~ m/STATEMENT\:|HINT\:|DETAIL\:|CONTEXT\:/){
+                              $output .= $context_line;
+                           }
+                        }
+
+                        my $end_byte_count = tell FH; 
+                        my $rewind_byte_count = -1 * ($end_byte_count - $start_byte_count);
+                        seek FH, $rewind_byte_count, 1; 
+                    }
+                }
+            close(FH);
         }        
         
     }
+    
+      my $output_heading  =  "\nReport For Date: $report_date\nTotal New Unique Errors Found: ". @full_new_lines;
+          if($static_ignore && $dynamic_ignore){
+              $output_heading .= " (Minus Static & Dynamic Ignores)\n";
+          }
+          elsif($static_ignore){
+             $output_heading .= " (Minus Static Ignores)\n";
+          }
+          elsif($dynamic_ignore){
+             $output_heading .= " (Minus Dynamic Ignores)\n";
+          }
+          else{
+             $output_heading .= "\n";
+          }     
+      $output_heading .=  "Total Recurring Unique Errors: ". @full_recurring_lines;
+       
+         if($static_ignore && $dynamic_ignore){
+             $output_heading .= " (Minus Static & Dynamic Ignores)\n";
+         }
+         elsif($static_ignore){
+             $output_heading .= " (Minus Static Ignores)\n";
+         }
+         elsif($dynamic_ignore){
+             $output_heading .= " (Minus Dynamic Ignores)\n";
+         }
+         else{
+             $output_heading .= "\n";
+         }        
+    
+    $output = $output_heading.$output; 
     
     return $output; 
     
@@ -487,7 +558,6 @@ sub display_help_text(){
     print "   -i: Static ignore. Ignores static error messages stored in 'static_ignore.dat'.\n";
     print "   -ix: Dynamic ignore. Ignores dynamic error message templates stored in 'dynamic_ignore.dat'.\n";
     print "   -c: Run script in cron mode. Bypasses need for manual entry and e-mails errors to DBA team.\n";
-    print "   -y: Start checking from yesterday log file.\n";
     print "   -h: Display help. Generates this message and exits script.\n";
     print "\n\n";   
 }
