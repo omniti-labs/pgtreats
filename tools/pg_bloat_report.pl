@@ -248,7 +248,7 @@ __EXTRA__WHERE__
       GROUP BY 1,2,3,4,5
     ) AS foo
   ) AS rs
-  JOIN pg_class cc ON cc.relname = rs.tablename
+  JOIN pg_class cc ON cc.relname = rs.tablename and cc.relkind = 'r'
   JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema'
 ) AS sml
 WHERE sml.relpages - otta > 128 
