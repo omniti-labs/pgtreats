@@ -266,7 +266,7 @@ SELECT
   CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END AS wastedbytes,
   pg_size_pretty((CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END)::bigint) AS pwastedbytes,
   bs*ipages::bigint as relbytes,
-  pg_size_pretty((bs*relpages::bigint)::bigint) as prelbytes
+  pg_size_pretty((bs*ipages::bigint)::bigint) as prelbytes
 FROM (
   SELECT
     schemaname, tablename, cc.reltuples, cc.relpages, bs,
