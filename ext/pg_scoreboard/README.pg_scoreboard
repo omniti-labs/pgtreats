@@ -1,0 +1,25 @@
+The pg_scoreboard package provides an in-memory task tracking system.  It
+is specifically designed to track the status of multiple agents in a complex
+multi-process, multi-server environment.
+
+Usage:
+
+A process starts and connects to PostgreSQL and runs:
+
+  select scoreboard.process_register('mytask (params or notes)');
+
+On a regular interval, heartbeat or update the current status of the job:
+
+  select scoreboard.process_status('handling some doo-dad #23142');
+
+On completion, either terminate the postgres connection or explicitly:
+
+  select scoreboard.process_deregister();
+
+If you are terminating the process, it's recommended to do only that and
+not call the process_deregister() function as the action will happen twice
+for no gain.
+
+To see the current scoreboard:
+
+  select * from scoreboard.scoreboard;

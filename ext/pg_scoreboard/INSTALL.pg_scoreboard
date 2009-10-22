@@ -1,0 +1,4 @@
+# add this line to your postgresql config
+shared_preload_libraries = 'pg_scoreboard.so'
+
+# create the scoreboard schema using pg_scoreboard.sql
