@@ -239,7 +239,7 @@ verbose_msg "Border date: %s\n" "$BORDER_DATE"
 # -maxdepth options
 # Using ls could be an option, but it tends to write messages to STDERR if
 # there are no matching files - not something that we would like.
-find "$LOG_DIRECTORY" -type f \( -name 'postgresql-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].log' -o -name 'postgresql-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].log' \) -print | \
+find "$LOG_DIRECTORY"/ -type f \( -name 'postgresql-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].log' -o -name 'postgresql-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].log' \) -print | \
     egrep "^${LOG_DIRECTORY}/postgresql-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9](_[0-9][0-9][0-9][0-9][0-9][0-9])?.log" | \
     sort | \
     while read SOURCE_FILENAME
