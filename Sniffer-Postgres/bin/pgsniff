@@ -169,6 +169,8 @@ sub operation {
   $log2 = $q->{tuples} ? int(log($q->{tuples})/log(2)) : -1;
   ++$hist->{$q->{query}}->{results}->{$log2};
   $hist->{$q->{query}}->{total_tuples} += $q->{tuples};
+
+  $hist->{$q->{query}}->{cnt}++;
   finish() if (--$limit == 0);
 }
 
@@ -176,31 +178,42 @@ sub print_query_hist {
   my ($n, $q) = @_;
   my $invocations = 0;
   my ($bar, $cnt);
-  printf "== %d ==\n$q->{query}\n--- total run time: %2.f ms ---\n", $n, $q->{total_time} * 1000;
+  printf "== (rank: %d) run: %d, cumm. runtime %.3f ms, avg. tuples: %.2f ==\n",
+         $n, $q->{cnt}, $q->{total_time} * 1000, $q->{total_tuples} / $q->{cnt};
+  print "\nQUERY: $q->{query}\n\n";
+  printf "-- Runtime --\n";
   my ($top) = sort { $b <=> $a } keys %{$q->{runtime}};
   my ($max) = sort { $b <=> $a } values %{$q->{runtime}};
-  while($top >= 0) {
+  my $nentries = keys %{$q->{runtime}};
+  while($top >= 0 && $nentries > 0) {
+    $nentries-- if exists $q->{runtime}->{$top};
     $cnt = exists $q->{runtime}->{$top} ? $q->{runtime}->{$top} : 0;
     $invocations += $cnt;
     $bar = "#" x int(40 * $cnt / $max);
     $bar .= " " x (40 - length($bar));
-    printf " %10d ms | $bar     ($cnt)\n", (2 ** $top);
+    my $range = sprintf "[%d - %d) ms", int(2 ** ($top-1) ), (2 ** $top);
+    printf " %13s | $bar     ($cnt)\n", $range;
     $top--;
   }
 
-  printf "--- average tuples returned: %.3f ---\n", $q->{total_tuples} / $invocations;
+  printf "\n-- Tuples Returned --\n";
   ($top) = sort { $b <=> $a } keys %{$q->{results}};
   ($max) = sort { $b <=> $a } values %{$q->{results}};
+  $nentries = keys %{$q->{results}};
   if($max > 0) {
-    while($top >= -1) {
+    while($top >= -1 && $nentries > 0) {
+      $nentries-- if exists $q->{results}->{$top};
       $cnt = exists $q->{results}->{$top} ? $q->{results}->{$top} : 0;
       $bar = "#" x int(40 * $cnt / $max);
       $bar .= " " x (40 - length($bar));
-      printf "    %10d | $bar     ($cnt)\n", ($top >= 0) ? (2 ** $top) : 0;
+      my ($start, $end) = (($top >= 0) ? (2 ** $top) : 0, (2 ** ($top+1)) - 1);
+      my $range = ($start < $end) ? sprintf "%d - %d", $start, $end :
+                                    sprintf "%d", $start;
+      printf " %13s | $bar     ($cnt)\n", $range;
       $top--;
     }
   }
-  print "\n";
+  print "\n\n";
 }
 sub finish {
   if($histogram) {
