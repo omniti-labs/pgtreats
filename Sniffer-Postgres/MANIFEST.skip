@@ -1,0 +1,13 @@
+.cvsignore$
+^.releaserc
+^blib/
+^Sniffer-Connection-.*
+CVS/
+^pm_to_blib
+.tar.gz$
+.old$
+^Makefile$
+^cvstest$
+^blibdirs$
+bin/.*.sqlite$
+^downloads/

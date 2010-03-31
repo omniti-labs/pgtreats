@@ -1,0 +1,202 @@
+#!/usr/bin/perl -w
+use strict;
+use Sniffer::Postgres;
+use POSIX qw/strftime/;
+use Getopt::Long;
+use IO::File;
+use IO::Handle;
+
+=head1 NAME
+
+pgsniff - Dump info about queries as they happen
+
+=head1 SYNOPSIS
+
+  pgsniff < -d interface | -f filename >
+          [ -l <filename> ] [ --hist ]
+          [ -n <cnt> ] [ -t <cnt> ] [-pg]
+          [ --inflight <port> ]
+          [ BPF filter syntax ]
+
+=head1 DESCRIPTION
+
+This tool will analyze either live packet streams or post-mortem
+packet dumps to extract PostgreSQL session information.  It will
+track the client<->server communication and reveal information
+about client requests (queries, prepares, etc.) and various
+metadata and statistics.
+
+=over 4
+
+=item -d <interface>
+
+Specifies a network C<interface> for live packet capture. This option
+is not allowed in combination with -f.
+
+=item -f <filename>
+
+Specifies the C<filename> of a  pcap file dump (output of tcpdump).
+This option is not allowed in combination with -d.
+
+=item -l <filename>
+
+Write the witnessed queries out to the specified C<filename>.  If "-"
+is specified, standard output is used.  If omitted, not log file is
+generated.
+
+=item -pg
+
+If writing a log file (see -l), use a logging format that looks like
+PostgreSQL's native query logging format to allow easy consumption by
+other PostgreSQL log processing tools.
+
+=item --hist
+
+Generate a historgram of time spent and tuples returned from each
+query sorted by total cummulative execution time.  This can be
+limited using the -t option.
+
+=item -t <cnt>
+
+Limit the histogram (--hist) output to the top C<cnt> most time comsuming
+queries.  If omitted, all queries are displayed.
+
+=item -n <cnt>
+
+If specified, stop the program after C<cnt> queries can been witnessed.
+
+=item --inflight <port>
+
+By default, the system will only consider newly established postgresql
+client connections (those that progress through a normal TCP handshake).
+If this option is specified, it will attempt to start analyzing TCP
+sessions that are currently "in flight" by noticing packets targeted
+at the specified destination tcp C<port>.
+
+=back
+
+An optional BPF filter string may be specified to limit the packet capture
+output.  If not specified, the default BPF filter is "port 5432"
+
+=cut
+
+my $max = 0;
+my $pgformat = 0;
+my $hist = {};
+my $VERBOSE = 0;
+my $inflight = 0;
+my $limit = 0;
+my $topn = 100;
+my $device;
+my $file;
+my $logfile;
+my $log_output;
+my $histogram;
+GetOptions(
+  "inflight=i" => \$inflight,
+  "pg" => \$pgformat,
+  "d=s" => \$device,
+  "f=s" => \$file,
+  "n=i" => \$limit,
+  "t=i" => \$topn,
+  "l=s" => \$logfile,
+  "hist" => \$histogram,
+);
+my $filter = shift;
+die "one of -f <file> or -d <device> is required\n"
+  if((!$file && !$device) || ($file && $device));
+if(defined $logfile) {
+  if($logfile eq '-') {
+    $log_output = IO::Handle->new();
+    $log_output->fdopen(fileno(STDOUT), "w");
+  }
+  else {
+    $log_output = IO::File->new(">$logfile");
+  }
+}
+
+sub operation {
+  my $q = shift;
+  if ($log_output) {
+    if ($pgformat) {
+      # time (ip(port)) [pid]: [?-?] dsn LOG:  duration: <time>  statement: <statement>
+      my $ts = strftime "%Y-%m-%d %H:%M:%S UTC", gmtime(int($q->{start_time}));
+      (my $qoneline = $q->{query}) =~ s/[\r\n]/ /gm;
+      printf "%s (%s(%d)) [1]: [1-1] user=unknown,db=unknown LOG:  duration: %.3f ms  statement: %s\n",
+             $ts, $q->{connection}->src_host, $q->{connection}->src_port, $q->{query_time} * 1000, $qoneline;
+    } else {
+      printf $log_output "%s %s:%d %.3f $q->{tuples} $q->{query}\n",
+             $q->{start_time}, $q->{connection}->src_host, $q->{connection}->src_port,
+             $q->{query_time} * 1000;
+    }
+  }
+
+  my $log2 = int(log($q->{query_time}*1000 + 1)/log(2));
+  $hist->{$q->{query}}->{query} ||= $q->{query};
+  my $cnt = ++$hist->{$q->{query}}->{runtime}->{$log2};
+  $hist->{$q->{query}}->{total_time} += $q->{query_time};
+  $max = ($max < $cnt) ? $cnt : $max;
+
+  $log2 = $q->{tuples} ? int(log($q->{tuples})/log(2)) : -1;
+  ++$hist->{$q->{query}}->{results}->{$log2};
+  $hist->{$q->{query}}->{total_tuples} += $q->{tuples};
+  finish() if (--$limit == 0);
+}
+
+sub print_query_hist {
+  my ($n, $q) = @_;
+  my $invocations = 0;
+  my ($bar, $cnt);
+  printf "== %d ==\n$q->{query}\n--- total run time: %2.f ms ---\n", $n, $q->{total_time} * 1000;
+  my ($top) = sort { $b <=> $a } keys %{$q->{runtime}};
+  my ($max) = sort { $b <=> $a } values %{$q->{runtime}};
+  while($top >= 0) {
+    $cnt = exists $q->{runtime}->{$top} ? $q->{runtime}->{$top} : 0;
+    $invocations += $cnt;
+    $bar = "#" x int(40 * $cnt / $max);
+    $bar .= " " x (40 - length($bar));
+    printf " %10d ms | $bar     ($cnt)\n", (2 ** $top);
+    $top--;
+  }
+
+  printf "--- average tuples returned: %.3f ---\n", $q->{total_tuples} / $invocations;
+  ($top) = sort { $b <=> $a } keys %{$q->{results}};
+  ($max) = sort { $b <=> $a } values %{$q->{results}};
+  if($max > 0) {
+    while($top >= -1) {
+      $cnt = exists $q->{results}->{$top} ? $q->{results}->{$top} : 0;
+      $bar = "#" x int(40 * $cnt / $max);
+      $bar .= " " x (40 - length($bar));
+      printf "    %10d | $bar     ($cnt)\n", ($top >= 0) ? (2 ** $top) : 0;
+      $top--;
+    }
+  }
+  print "\n";
+}
+sub finish {
+  if($histogram) {
+    my $qn = 1;
+    foreach my $q (sort { $b->{total_time} <=> $a->{total_time } } values %$hist) {
+      print_query_hist($qn++, $q);
+      last if --$topn == 0;
+    }
+  }
+  exit;
+}
+
+my $sniffer = Sniffer::Postgres->new(
+  callbacks => {
+      request  => sub { },
+      operation => \&operation,
+      log      => sub { print STDERR "$_[0]\n" if $VERBOSE },
+      tcp_log  => sub { print $_[0] if $VERBOSE > 1 },
+  }
+);
+
+$sniffer->inflight($inflight) if $inflight;
+
+if($device) {
+  $sniffer->run( $device, $filter );
+} elsif($file) {
+  $sniffer->run_file( $file, $filter );
+}

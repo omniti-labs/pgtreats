@@ -1,0 +1,20 @@
+--- #YAML:1.0
+name:                Sniffer-Postgres
+version:             0.0.1
+abstract:            multi-connection sniffer driver
+license:             ~
+author:              
+    - Theo Schlossnagle <jesus@omniti.com>
+    - Max Maischein <corion@cpan.org>
+generated_by:        ExtUtils::MakeMaker version 6.42
+distribution_type:   module
+requires:     
+    Class::Accessor:               0
+    Class::Data::Inheritable:      0
+    Exporter::Lite:                0
+    Net::Pcap:                     0.09
+    NetPacket::TCP:                0
+    Sniffer::HTTP:                 0.19
+meta-spec:
+    url:     http://module-build.sourceforge.net/META-spec-v1.3.html
+    version: 1.3
