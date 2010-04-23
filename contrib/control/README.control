@@ -1,0 +1,2 @@
+
+select * from pgreats_control.pg_control;
