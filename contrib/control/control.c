@@ -51,6 +51,12 @@
 #if PG_CONTROL_VERSION >= 840 && PG_CONTROL_VERSION < 900
 #define CONTROL_NUM_ROWS 25
 #endif
+#if PG_CONTROL_VERSION >= 900 && PG_CONTROL_VERSION < 1000
+#define CONTROL_NUM_ROWS 33
+#endif
+#ifndef CONTROL_NUM_ROWS
+#error No support for your postgres version
+#endif
 
 #define uint64_item(elem) do { \
   values[0] = (char *) pstrdup(#elem); \
@@ -194,6 +200,16 @@ pg_control_variables(PG_FUNCTION_ARGS) {
       case 22: uint32_item(checkPointCopy.nextMulti); break;
       case 23: uint32_item(checkPointCopy.nextMultiOffset); break;
       case 24: time_item(checkPointCopy.time); break;
+#if PG_CONTROL_VERSION >= 900 && PG_CONTROL_VERSION < 1000
+      case 25: XLogRecPtr_item(backupStartPoint); break;
+      case 26: uint32_item(checkPointCopy.oldestXid); break;
+      case 27: uint32_item(checkPointCopy.oldestXidDB); break;
+      case 28: uint32_item(checkPointCopy.MaxConnections); break;
+      case 29: uint32_item(checkPointCopy.max_prepared_xacts); break;
+      case 30: uint32_item(checkPointCopy.max_locks_per_xact); break;
+      case 31: bool_item(checkPointCopy.XLogStandbyInfoMode); break;
+      case 32: uint32_item(checkPointCopy.oldestActiveXid); break;
+#endif
       default:
         elog(ERROR, "internal control error");
     }
