@@ -1,2 +1,9 @@
 
-select * from pgreats_control.pg_control;
+select * from pgtreats_control.pg_control;
+
+# do something interesting
+postgres=# select value as last_checkpoint, now(), checkpoint_timeout, now() - value as lag, now() - value > checkpoint_timeout as is_behind from (select  value::timestamptz, (select setting::interval from pg_settings where name = 'checkpoint_timeout') as checkpoint_timeout  from pgtreats_control.pg_control where name = 'checkPointCopy.time') x ;
+    last_checkpoint     |             now              | checkpoint_timeout |      lag       | is_behind 
+------------------------+------------------------------+--------------------+----------------+-----------
+ 2010-04-23 12:58:26-04 | 2010-04-23 12:59:37.38634-04 | 00:05:00           | 00:01:11.38634 | f
+
