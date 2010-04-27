@@ -1,1 +1,1 @@
-drop schema pgtreats_control cascade;
+drop schema controldata cascade;
