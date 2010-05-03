@@ -34,6 +34,7 @@ Options:
              :   - lzma
              : VALUE can be full path to program, but it's name must be one of
              : the supported programs.
+    -r       : remove the logfiles instead of archiving them
     -n       : use nice when compressing
     -o       : overwrite pre-existing archive files (otherwise, log files which
              : would archive to files that already exist will get skipped with
@@ -86,7 +87,7 @@ verbose_msg () {
 # Description : Reads arguments from command line, and validates them
 #             : default values are in "MAIN PROGRAM" to simplify finding them
 read_arguments () {
-    while getopts ':d:xva:k:c:noh' opt "$@"
+    while getopts ':d:xva:k:c:norh' opt "$@"
     do
         case "$opt" in
             d)
@@ -112,6 +113,9 @@ read_arguments () {
                 ;;
             o)
                 OVERWRITE_ARCHIVE=1
+                ;;
+            r)
+                REMOVE_LOGS=1
                 ;;
             h)
                 show_help_and_exit
@@ -197,6 +201,7 @@ KEEP_DAYS=7
 COMPRESS=gzip
 USE_NICE=0
 OVERWRITE_ARCHIVE=0
+REMOVE_LOGS=0
 
 # Set locale to sane one, to speed up comparisons, and be sure that < and > on
 # strings work ok.
@@ -215,6 +220,7 @@ verbose_msg "$0 Settings:
   - OVERWRITE_ARCHIVE : $OVERWRITE_ARCHIVE
   - USE_NICE          : $USE_NICE
   - VERBOSE           : $VERBOSE
+  - REMOVE_LOGS       : $REMOVE_LOGS
 "
 
 # Make sure every error past this line is critical - this is to avoid having to
@@ -252,6 +258,13 @@ find "$LOG_DIRECTORY"/ -type f \( -name 'postgresql-[0-9][0-9][0-9][0-9]-[0-9][0
         fi
 
         verbose_msg "Archiving file %-32s ... " "$FILENAME"
+
+        if [[ "$REMOVE_LOGS" -eq "1" ]]
+        then
+            rm "$SOURCE_FILENAME"
+            verbose_msg "File removed.\n"
+            continue
+        fi
 
         # Extract year and month from log filename - to be used in archive path
         YEAR_MONTH=$( echo "$FILENAME" | cut -d- -f2,3 )
