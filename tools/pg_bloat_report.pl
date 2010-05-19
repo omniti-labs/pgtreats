@@ -250,7 +250,7 @@ __EXTRA__WHERE__
     ) AS foo
   ) AS rs
   JOIN pg_class cc ON cc.relname = rs.tablename and cc.relkind = 'r'
-  JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema' AND nn.nspname !~ '^pg_temp'
+  JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema'  AND nn.nspname !~ '^pg_temp'
 ) AS sml
 WHERE sml.relpages - otta > 128 
       AND ROUND(CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages/otta::numeric END,1) > 1.2 
