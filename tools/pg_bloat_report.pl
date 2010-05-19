@@ -122,6 +122,7 @@ sub run_report {
     my $sql = shift;
 
     open my $fh, '>', 'report.sql' or die 'Cannot write to report.sql file in ' . $O->{ 'workdir' } . ' : ' . $OS_ERROR;
+    print $fh "begin; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;\n";
     print $fh $sql;
     close $fh;
 
@@ -249,7 +250,7 @@ __EXTRA__WHERE__
     ) AS foo
   ) AS rs
   JOIN pg_class cc ON cc.relname = rs.tablename and cc.relkind = 'r'
-  JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema'
+  JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema' AND nn.nspname !~ '^pg_temp'
 ) AS sml
 WHERE sml.relpages - otta > 128 
       AND ROUND(CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages/otta::numeric END,1) > 1.2 
@@ -301,7 +302,7 @@ __EXTRA__WHERE__
     ) AS foo
   ) AS rs
   JOIN pg_class cc ON cc.relname = rs.tablename
-  JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema'
+  JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema' AND nn.nspname !~ '^pg_temp'
   LEFT JOIN pg_index i ON indrelid = cc.oid
   LEFT JOIN pg_class c2 ON c2.oid = i.indexrelid
 ) AS sml
