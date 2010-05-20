@@ -9,10 +9,13 @@
 ############################################################################
 
 LOGFILE=/home/postgres/logs/table_growth.rpt
-psql -d pagila -c "select 'Top 10 Tables Growth For:-  '||to_char(current_date - '1 month'::interval,'Mon-YYYY') as Month; select table_owner, schema_name, table_name, pg_size_pretty(growth_size::bigint) as Growth_size_MB from otools.table_growth where sum_flag = 2 and to_char(capture_time,'mm/yyyy')=to_char((current_date - '1 month'::interval),'mm/yyyy') order by growth_size desc limit 10;" > $LOGFILE
+DNAME=your_real_postgres_db_name
+
+/opt/pgsql90alpha4/bin/psql -d ${DNAME} -c "select 'Top 10 Tables Growth For:-  '||to_char(current_date - '1 month'::interval,'Mon-YYYY') as Month; select table_owner, schema_name, table_name, pg_size_pretty(growth_size::bigint) as Growth_size_MB from otools.table_growth where sum_flag = 2 and to_char(capture_time,'mm/yyyy')=to_char((current_date - '1 month'::interval),'mm/yyyy') order by growth_size desc limit 10;" > $LOGFILE
 
 if [ -s "$LOGFILE" ]; then
-  mailx -s "Tablegrowth Monitor Report" dba@example.com < $LOGFILE
+  M_HOSTNAME=$(hostname)'.'$(cat /etc/resolv.conf | grep domain | cut -f2 -d' ')
+  mailx -s "Tablegrowth Monitor Report for ${DNAME} on ${M_HOSTNAME}" dba@omniti.com < $LOGFILE
 fi
 rm $LOGFILE
 exit
