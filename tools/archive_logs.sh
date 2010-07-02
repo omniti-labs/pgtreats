@@ -39,14 +39,15 @@ Options:
     -o       : overwrite pre-existing archive files (otherwise, log files which
              : would archive to files that already exist will get skipped with
              : warning)
+    -p VALUE : prefix of log filename. Defaults to 'postgresql'
 
 Defaults:
     -a archive -k 7 -c gzip
 
 Description:
 
-$0 finds all PostgreSQL log files, named: postgresql-YYYY-MM-DD.log or
-postgresql-YYYY-MM-DD_HHMISS.log, skips files that are too new to new
+$0 finds all PostgreSQL log files, named: "PREFIX"-YYYY-MM-DD.log or
+"PREFIX"-YYYY-MM-DD_HHMISS.log, skips files that are too new to new
 compressed, compressed rest and moves to archive dir.
 
 Archive dir is structured in a way to minimize number of files in single
@@ -87,7 +88,7 @@ verbose_msg () {
 # Description : Reads arguments from command line, and validates them
 #             : default values are in "MAIN PROGRAM" to simplify finding them
 read_arguments () {
-    while getopts ':d:xva:k:c:norh' opt "$@"
+    while getopts ':d:xva:k:c:p:norh' opt "$@"
     do
         case "$opt" in
             d)
@@ -107,6 +108,9 @@ read_arguments () {
                 ;;
             c)
                 COMPRESS="$OPTARG"
+                ;;
+            p)
+                PREFIX="$OPTARG"
                 ;;
             n)
                 USE_NICE=1
@@ -154,6 +158,10 @@ read_arguments () {
         show_help_and_exit "Given log_directory (%s) is not usable (lack of x in mode)!" "$LOG_DIRECTORY"
     fi
 
+    if [[ "$PREFIX" == "" ]]
+    then
+        PREFIX=postgresql
+    fi
     COMPRESS_EXTENSION=$( get_compress_extension )
     if [[ "$COMPRESS_EXTENSION" == "" ]]
     then
@@ -245,14 +253,14 @@ verbose_msg "Border date: %s\n" "$BORDER_DATE"
 # -maxdepth options
 # Using ls could be an option, but it tends to write messages to STDERR if
 # there are no matching files - not something that we would like.
-find "$LOG_DIRECTORY"/ -type f \( -name 'postgresql-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].log' -o -name 'postgresql-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].log' \) -print | \
-    egrep "^${LOG_DIRECTORY}/postgresql-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9](_[0-9][0-9][0-9][0-9][0-9][0-9])?.log" | \
+find "$LOG_DIRECTORY"/ -type f \( -name "${PREFIX}-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].log" -o -name "${PREFIX}-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].log" \) -print | \
+    egrep "^${LOG_DIRECTORY}/${PREFIX}-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9](_[0-9][0-9][0-9][0-9][0-9][0-9])?.log" | \
     sort | \
     while read SOURCE_FILENAME
     do
         FILENAME=$( basename "$SOURCE_FILENAME" )
         # skip files that are not older than $BORDER_DATE
-        if [[ ! "$FILENAME" < "postgresql-$BORDER_DATE" ]]
+        if [[ ! "$FILENAME" < "${PREFIX}-$BORDER_DATE" ]]
         then
             continue
         fi
