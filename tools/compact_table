@@ -133,7 +133,7 @@ verbose_msg () {
 # Description : Reads arguments from command line, and validates them
 #             : default values are in "MAIN PROGRAM" to simplify finding them
 read_arguments () {
-    while getopts 'U:h:p:d:c:n:t:k:xv' opt "$@"
+    while getopts ':U:h:p:d:c:n:t:k:xv' opt "$@"
     do
         case "$opt" in
             U)
