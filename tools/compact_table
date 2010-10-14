@@ -72,7 +72,11 @@ get_relation_page_count() {
 get_base_settings() {
     TUPLES_PER_PAGE=$( psql -q -A -t -X -c "select current_setting('block_size')::int4 / sum(attlen) from pg_attribute where attrelid = '$TABLE_SCHEMA.$TABLE_NAME'::regclass and attnum < 0" )
     verbose_msg "At most, we can have %d tuples per page.\n" "$TUPLES_PER_PAGE"
-    COLUMN_TO_UPDATE=$( psql -q -A -t -X -c "select quote_ident(attname) from pg_attribute where attrelid = '$TABLE_SCHEMA.$TABLE_NAME'::regclass and attnum > 0 and not attisdropped order by attnum asc limit 1" )
+    COLUMN_TO_UPDATE=$( psql -q -A -t -X -c "select quote_ident(attname) from pg_attribute where attrelid = '$TABLE_SCHEMA.$TABLE_NAME'::regclass and attnum > 0 and not attisdropped and attnum::text not in (select regexp_split_to_table(indkey::text, ' ') from pg_index where indrelid = '$TABLE_SCHEMA.$TABLE_NAME'::regclass) order by attnum asc limit 1" )
+    if [[ -z "$COLUMN_TO_UPDATE" ]]
+    then
+        COLUMN_TO_UPDATE=$( psql -q -A -t -X -c "select quote_ident(attname) from pg_attribute where attrelid = '$TABLE_SCHEMA.$TABLE_NAME'::regclass and attnum > 0 and not attisdropped order by attnum asc limit 1" )
+    fi
     if [[ -z "$COLUMN_TO_UPDATE" ]]
     then
         show_help_and_exit "Cannot find column to update. Does this table have any columns?"
@@ -106,9 +110,13 @@ Options:
     -d       : database name to connect to
     -c       : path to psql program
     -v       : show information while processing log files
+    -i       : turn on initial vacuum
+    -I       : turn off initial vacuum
+    -f       : turn on final vacuum
+    -F       : turn off final vacuum
 
 Defaults:
-    -c psql -n public -k 10
+    -c psql -n public -k 10 -f
 
 Description:
 
@@ -133,7 +141,7 @@ verbose_msg () {
 # Description : Reads arguments from command line, and validates them
 #             : default values are in "MAIN PROGRAM" to simplify finding them
 read_arguments () {
-    while getopts ':U:h:p:d:c:n:t:k:xv' opt "$@"
+    while getopts ':U:h:p:d:c:n:t:k:xviIfF' opt "$@"
     do
         case "$opt" in
             U)
@@ -159,6 +167,18 @@ read_arguments () {
                 ;;
             k)
                 export CLEAN_PAGES="$OPTARG"
+                ;;
+            i)
+                export INITIAL_VACUUM="1"
+                ;;
+            I)
+                export INITIAL_VACUUM="0"
+                ;;
+            f)
+                export FINAL_VACUUM="1"
+                ;;
+            F)
+                export FINAL_VACUUM="0"
                 ;;
             x)
                 EXTENDED_DEBUG=1
@@ -204,6 +224,7 @@ VERBOSE=0
 export TABLE_SCHEMA=public
 export CLEAN_PAGES=10
 export PSQL='psql'
+export FINAL_VACUUM=1
 
 # Set locale to sane one, to speed up comparisons, and be sure that < and > on
 # strings work ok.
@@ -216,6 +237,8 @@ read_arguments "$@"
 verbose_msg "$0 Settings:
   - CLEAN_PAGES       : $CLEAN_PAGES
   - EXTENDED_DEBUG    : $EXTENDED_DEBUG
+  - FINAL_VACUUM      : $FINAL_VACUUM
+  - INITIAL_VACUUM    : $INITIAL_VACUUM
   - PGDATABASE        : $PGDATABASE
   - PGHOST            : $PGHOST
   - PGPORT            : $PGPORT
@@ -240,8 +263,11 @@ get_base_settings
 
 verbose_msg "Entering main loop.\n"
 
-verbose_msg "Initial vacuuming\n"
-$PSQL -q -A -t -X -c "VACUUM $TABLE_SCHEMA.$TABLE_NAME"
+if [[ "$INITIAL_VACUUM" -eq 1 ]]
+then
+    verbose_msg "Initial vacuuming\n"
+    $PSQL -q -A -t -X -c "VACUUM $TABLE_SCHEMA.$TABLE_NAME"
+fi
 
 get_relation_page_count
 CURRENT_PAGE_COUNT=$RETURN
@@ -259,8 +285,11 @@ do
     fi
 done
 
-verbose_msg "Final vacuuming\n"
-$PSQL -q -A -t -X -c "VACUUM $TABLE_SCHEMA.$TABLE_NAME"
+if [[ "$FINAL_VACUUM" -eq 1 ]]
+then
+    verbose_msg "Final vacuuming\n"
+    $PSQL -q -A -t -X -c "VACUUM $TABLE_SCHEMA.$TABLE_NAME"
+fi
 
 get_relation_page_count
 verbose_msg "Final table size: %d pages.\n" "$RETURN"
