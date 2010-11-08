@@ -4,7 +4,7 @@
 # Module Name   : email_locked_queries                                    # 
 # Module Type   : Shell script                                             #
 # Synopsis      : This script will send queries those are locked for more  # 
-                 than 10 minutes with the blocking query details           #
+#                 than 10 minutes with the blocking query details           #
 # Copyright     : 2010, OmniTI Inc.                                        #
 #                                                                          # 
 ############################################################################
