@@ -275,7 +275,12 @@ find "$LOG_DIRECTORY"/ -type f \( -name "${PREFIX}-[0-9][0-9][0-9][0-9]-[0-9][0-
         fi
 
         # Extract year and month from log filename - to be used in archive path
-        YEAR_MONTH=$( echo "$FILENAME" | cut -d- -f2,3 )
+        # ${FILENAME:${#PREFIX}} extracts part of filename after prefix.
+        # i.e. with prefix == "a-b", and filename being a-b-2010-10-11, it
+        # returns -1010-10-11
+        # This is done to allow - character in prefixes, yet to still make
+        # the cut below to extract what we need.
+        YEAR_MONTH=$( echo "${FILENAME:${#PREFIX}}" | cut -d- -f2,3 )
         if [[ ! -d "$ARCHIVE_DIR/$YEAR_MONTH" ]]
         then
             mkdir -p "$ARCHIVE_DIR/$YEAR_MONTH"
