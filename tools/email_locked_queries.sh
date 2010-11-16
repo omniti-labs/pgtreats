@@ -11,7 +11,7 @@
 
 LOGFILE=/home/postgres/logs/email_locked_queries.rpt
 DNAME=your_real_postgres_db_name
-EMAIL_LIST=dba@omniti.cm
+EMAIL_LIST=dba@omniti.com
 
 psql  -d ${DNAME} -x -t -q  -c  " 
 select
