@@ -11,6 +11,7 @@
 
 LOGFILE=/home/postgres/logs/email_locked_queries.rpt
 DNAME=your_real_postgres_db_name
+EMAIL_LIST=dba@omniti.cm
 
 psql  -d ${DNAME} -x -t -q  -c  " 
 select
@@ -40,7 +41,7 @@ FILESIZE=`ls -l $LOGFILE | awk '{print $5}'`
 M_HOSTNAME=$(hostname)'.'$(cat /etc/resolv.conf | grep domain | cut -f2 -d' ')
 
 if [ $FILESIZE -ge 11 ]; then
-        mailx -s "DB locked queries for ${DNAME} on ${M_HOSTNAME}" dba@omniti.com < $LOGFILE 
+        mailx -s "DB locked queries for ${DNAME} on ${M_HOSTNAME}" $EMAIL_LIST < $LOGFILE 
 fi
 
 rm $LOGFILE
