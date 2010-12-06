@@ -1,0 +1,258 @@
+#!/usr/bin/perl -w
+my $program = OmniTI::TableArchiver->new();
+$program->run();
+
+exit;
+
+package OmniTI::TableArchiver;
+use strict;
+use warnings;
+use Carp;
+use English qw( -no_match_vars );
+use Data::Dumper;
+use Getopt::Long;
+use Sys::Hostname;
+use File::Basename;
+use File::Temp qw( tempdir );
+use File::Spec;
+use POSIX qw( strftime );
+
+sub new {
+    my $class = shift;
+    my $self  = {};
+    return bless $self, $class;
+}
+
+sub slurp {
+    my $self     = shift;
+    my $filename = shift;
+
+    open my $fh, '<', $filename or croak "Cannot open $filename : $OS_ERROR\n";
+    local $INPUT_RECORD_SEPARATOR = undef;
+    my $reply = <$fh>;
+    close $fh;
+
+    return $reply;
+}
+
+sub run {
+    my $self = shift;
+    $self->read_arguments();
+    $self->prepare_working_dir();
+    $self->verify_db_connection();
+    $self->get_list_of_tables_to_archive();
+
+    for my $table ( @{ $self->{ 'tables' } } ) {
+        $self->verbose_msg( 2, 'Archiving: %s', $table );
+        $self->archive_table( $table );
+    }
+
+    $self->verbose_msg( 1, 'All done.' );
+    return;
+}
+
+sub archive_table {
+    my $self  = shift;
+    my $table = shift;
+
+    my $hostname = hostname();
+    $hostname =~ s/\..*//;
+
+    my $filename = sprintf '%s.%s.csv%s', $hostname, $table, $self->{ 'extension' };
+
+    my $output_filepath = File::Spec->catfile( $self->{ 'archive' }, $filename );
+
+    my $sql = sprintf 'COPY %s TO stdout;', $table;
+
+    $self->get_psql_output_to_file( $sql, $output_filepath, 1 );
+
+    my $drop_return = $self->get_psql_output_to_scalar( 'DROP TABLE ' . $table );
+
+    return;
+}
+
+sub get_list_of_tables_to_archive {
+    my $self = shift;
+    my $sql  = sprintf q{
+SET search_path = pg_catalog;
+SELECT
+    c.oid::regclass
+FROM
+    pg_class c
+    join pg_namespace n on c.relnamespace = n.oid
+WHERE
+    n.nspname !~ '^pg_'
+    and n.nspname <> 'information_schema'
+    and n.nspname ~ '%s'
+    and c.relname ~ '%s'
+    and c.relname ~ '[0-9]{8}'
+    and c.relkind = 'r'
+    and to_date( regexp_replace( c.relname, '^.*([0-9]{8})$', E'\\\\1'), 'YYYYMMDD') < ( select now() - '%s'::interval )
+        }, $self->{ 'schema' }, $self->{ 'table' }, $self->{ 'keep' };
+
+    my $tables_as_string = $self->get_psql_output_to_scalar( $sql );
+    my @tables = grep { /\S/ } split /\r?\n/, $tables_as_string;
+
+    if ( 0 == scalar @tables ) {
+        $self->verbose_msg( 1, 'There are no tables matching given criteria.' );
+        exit;
+    }
+
+    $self->verbose_msg( 1, '%u tables found to work on.', scalar @tables );
+    $self->{ 'tables' } = \@tables;
+
+    return;
+}
+
+sub prepare_working_dir {
+    my $self = shift;
+    my $dir = tempdir( basename( $PROGRAM_NAME ) . '.XXXXXXXX', 'CLEANUP' => 1, 'TMPDIR' => 1, );
+    $self->{ 'workdir' } = $dir;
+    return;
+}
+
+sub get_psql_output_to_file {
+    my $self = shift;
+    my ( $query, $stdout_file, $compress ) = @_;
+
+    my $query_file = File::Spec->catfile( $self->{ 'workdir' }, 'query.sql' );
+    open my $fh, '>', $query_file or croak( "Cannot write to $query_file : $OS_ERROR\n" );
+    print $fh $query;
+    close $fh;
+    my $stderr_file = File::Spec->catfile( $self->{ 'workdir' }, 'query.stderr' );
+
+    my $compressor = $compress ? ( "| " . $self->{ 'compressor' } . ' - ' ) : "";
+    my $command = sprintf '%s -qAtX -f %s %s > %s 2> %s', $self->{ 'psql' }, quotemeta( $query_file ), $compressor, quotemeta( $stdout_file ), quotemeta( $stderr_file );
+    $self->verbose_msg( 3, 'Running query: %s',   $query );
+    $self->verbose_msg( 4, 'Running command: %s', $command );
+
+    my $result = system $command;
+    my $stderr = $self->slurp( $stderr_file );
+
+    croak "Running [$command] failed with status $result.\n$stderr\n\n" if ( $result ) || ( $stderr );
+    unlink $query_file, $stderr_file;
+
+    return;
+}
+
+sub get_psql_output_to_scalar {
+    my $self  = shift;
+    my $query = shift;
+
+    my $filename = File::Spec->catfile( $self->{ 'workdir' }, 'query.output' );
+    $self->get_psql_output_to_file( $query, $filename );
+    my $result = $self->slurp( $filename );
+
+    unlink $filename;
+    return $result;
+}
+
+sub verbose_msg {
+    my $self  = shift;
+    my $level = shift;
+    return if $level > $self->{ 'verbose' };
+
+    my $format = shift;
+    $format =~ s/([^\n])\z/$1\n/;
+
+    print strftime( '%Y-%m-%d %H:%M:%S %Z : ', localtime time );
+    printf $format, @_;
+    return;
+}
+
+sub verify_db_connection {
+    my $self = shift;
+
+    my $reply = $self->get_psql_output_to_scalar( 'SELECT current_user, current_database()' );
+
+    croak( "Got unparseable output from psql when trying connection verification:\n$reply\n" ) unless $reply =~ m{\A([^|]+)\|([^|]+?)\r?\n\z};
+    my ( $user, $database ) = ( $1, $2 );
+    $self->verbose_msg( 1, 'Working with: username=%s ; database=%s', $user, $database );
+    return;
+}
+
+sub read_arguments {
+    my $self = shift;
+
+    my $vars = { 'verbose' => 0, 'psql' => 'psql', };
+    $self->show_help_and_die()
+        unless GetOptions( $vars, qw( dbname|d=s host|h=s port|p=i username|U=s schema|n=s table|t=s keep|k=s archive|a=s compressor|c=s extension|x=s verbose|v+ psql|P=s help|? ) );
+    $self->show_help_and_die() if $vars->{ 'help' };
+    $self->{ 'verbose' } = $vars->{ 'verbose' };
+
+    $ENV{ 'PGDATABASE' } = $vars->{ 'dbname' }   if defined $vars->{ 'dbname' };
+    $ENV{ 'PGHOST' }     = $vars->{ 'host' }     if defined $vars->{ 'host' };
+    $ENV{ 'PGPORT' }     = $vars->{ 'port' }     if defined $vars->{ 'port' };
+    $ENV{ 'PGUSER' }     = $vars->{ 'username' } if defined $vars->{ 'username' };
+
+    croak "You didn't provide --schema, and it's obligatory. Use --schema=^ to match all schemata.\n" unless $vars->{ 'schema' };
+    croak "You didn't provide --table, and it's obligatory. Use --table=^ to match all tables.\n"     unless $vars->{ 'table' };
+    croak "You didn't provide --keep, and it's obligatory.\n"                                         unless $vars->{ 'keep' };
+    croak "You didn't provide --archive, and it's obligatory.\n"                                      unless $vars->{ 'archive' };
+    croak "You didn't provide --compressor, and it's obligatory.\n"                                   unless $vars->{ 'compressor' };
+
+    croak "Given archive is not directory!\n" unless -d $vars->{ 'archive' };
+    croak "Given archive is not writable!\n"  unless -w $vars->{ 'archive' };
+
+    $vars->{ 'extension' } = '' unless defined $vars->{ 'extension' };
+    $vars->{ 'extension' } =~ s/^([^.])/.$1/;
+
+    @{ $self }{ qw(schema table keep archive compressor extension psql) } = @{ $vars }{ qw(schema table keep archive compressor extension psql) };
+
+    return;
+}
+
+sub show_help_and_die {
+    my $self = shift;
+    printf STDERR @_ if 0 < scalar @_;
+    print STDERR $self->help_msg();
+    exit( 1 );
+}
+
+sub help_msg {
+    return <<__EO_HELP__;
+Syntax:
+    $PROGRAM_NAME [options]
+
+[options]
+  * db connection *
+  --dbname     : -d : database name to connect to
+  --host       : -h : database server host or socket directory
+  --port       : -p : database server port
+  --username   : -U : database user name
+
+  * table selection *
+  --schema     : -n : regexp to match schema which will be scanned for
+                      tables to be archived
+  --table      : -t : regexp to match which tables should be archived
+  --keep       : -k : how old tables should be kept. Should match PostgreSQL
+                      INTERVAL syntax.
+
+  * output *
+  --archive    : -a : directory name where to put archive files
+  --compressor : -c : name of program to use for compression. Has to support
+                      compressing from stdin to stdout.
+  --extension  : -x : what extension should be added to generated filename
+                    : after compression. Leading dot is irrelevant.
+
+  * other *
+  --psql       : -P : path to psql program
+  --verbose    : -v : show debugging output. Add more -v to make it more
+                      verbose (up to -v -v -v -v)
+  --help       : -? : show this help page
+
+Description:
+This program will archive all tables matching given --schema and --table, as
+long as their names and with 8 digits.
+
+These 8 digits should represent date (format: YYYYMMDD), that is older than --keep.
+
+If table is in schema that doesn't match --schema, or it's name doesn't
+match --table, or its name doesn't end with 8 digits, or the digits don't
+represent date older than --keep - it will be left untouched.
+
+
+__EO_HELP__
+}
+
+1;
