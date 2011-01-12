@@ -88,6 +88,7 @@ WHERE
     and c.relname ~ '[0-9]{8}'
     and c.relkind = 'r'
     and to_date( regexp_replace( c.relname, '^.*([0-9]{8})$', E'\\\\1'), 'YYYYMMDD') < ( select now() - '%s'::interval )
+ORDER BY 1
         }, $self->{ 'schema' }, $self->{ 'table' }, $self->{ 'keep' };
 
     my $tables_as_string = $self->get_psql_output_to_scalar( $sql );
