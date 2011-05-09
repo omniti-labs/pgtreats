@@ -1,4 +1,4 @@
-#!/data/bin/perl
+#!/usr/bin/perl
 
 #Performs initial script configuration. Must be executed within BEGIN
 #in order to dynamically set "use lib" value. 
@@ -101,7 +101,7 @@ my @seen_error_msgs;
 
    #Populate array of all logfile path names, sorted in descending order
     opendir(FH, $directory);
-      my @file_list = grep(/^postgresql-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\.log$/, readdir(FH));
+       my @file_list = grep(/^postgresql.*\.log$/, readdir(FH));
     closedir(FH);
     
     @file_list = sort {$b cmp $a} @file_list;
@@ -524,7 +524,7 @@ sub replace_special_chars(){
 
 my $data_string = shift; 
 
-$data_string =~ s/([\$\.\"\'\(\)\|\*])/\\$1/g;
+$data_string =~ s/([\$\.\"\'\(\)\|\*\[\]])/\\$1/g;
 
 return $data_string;
 
