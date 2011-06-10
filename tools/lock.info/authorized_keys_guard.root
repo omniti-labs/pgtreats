@@ -1,0 +1,16 @@
+#!/bin/bash
+if echo "$SSH_ORIGINAL_COMMAND" | grep -qE '^info [0-9]+$'
+then
+    local_port="${SSH_ORIGINAL_COMMAND##* }"
+    pid="$( netstat -ntap | awk '$4~/:'"$local_port"'$/ && $6 == "ESTABLISHED" {print $7}' | cut -d/ -f1 )"
+    printf "Remote PID        : %d\n" "$pid"
+
+    printf "Working directory : %s\n" "$( readlink /proc/$pid/cwd )"
+    printf "Executable        : %s\n" "$( readlink /proc/$pid/exe )"
+    printf "Real arguments    :"
+    while IFS= read -rd '' argument
+    do
+        printf " %q" "$argument"
+    done < <( cat /proc/$pid/cmdline )
+    echo
+fi

@@ -1,0 +1,143 @@
+#!/bin/bash
+
+# here are function definitions, for actual code that is executed, search for MAIN PROGRAM comment
+
+setup() {
+    ssh_remote_user=hlubaczewski
+    ssh_keyfile=/home/hlubaczewski/lock.info/lock.info.key
+    PGUSER=postgres
+    PGDATABASE=gilt_prod
+    PGPORT=5432
+    PGHOST=127.0.0.1
+
+    ssh_options="-n -q -l $ssh_remote_user -i $ssh_keyfile -o StrictHostKeyChecking=no -o PasswordAuthentication=no"
+    ssh="ssh $ssh_options"
+    export PGUSER PGDATABASE PGHOST PGPORT
+}
+
+clear_ssh_env() {
+    while read line
+    do
+        unset ${line%%=*}
+    done < <( env | grep ^SSH )
+}
+
+show_remote_data() {
+    export use_ip="$1"
+    export use_port="$2"
+    $ssh $use_ip info $use_port
+}
+
+# MAIN PROGRAM #
+
+setup
+clear_ssh_env
+
+locked_queries="$( psql -qAtX -F$'\t' -c "
+    select
+        extract(epoch from now() - query_start)::int8,
+        procpid,
+        regexp_replace(current_query, E'\\\\n', ' ', 'g'),
+        query_start::timestamp(0),
+        coalesce(host(client_addr)::text, 'unix socket'),
+        coalesce(client_port::text, 'internal connection'),
+        usename,
+        application_name,
+        xact_start::timestamp(0),
+        backend_start::timestamp(0)
+    from pg_stat_activity
+    where query_start < now() - '5 seconds'::interval and waiting
+    order by query_start
+    " )"
+
+i=0
+while IFS=$'\t' read -r blocked_runtime blocked_pid blocked_query blocked_start blocked_ip blocked_port blocked_user blocked_app blocked_xact_start blocked_backend_start
+do
+    i=$(( i + 1 ))
+    printf "%.2d. Query: %s\n" "$i" "$blocked_query"
+    printf "  - Blocked for %d seconds.\n" "$blocked_runtime"
+    printf "  - Backend / transaction / query start: %s / %s / %s\n" "$blocked_backend_start" "$blocked_xact_start" "$blocked_start"
+    printf "  - Blocked user and application: %s / %s\n" "$blocked_user" "$blocked_app"
+    printf "  - Connection from: %s (remote port %s)\n" "$blocked_ip" "$blocked_port"
+
+    if [[ "$blocked_ip" == "unix socket" ]]
+    then
+        printf "    - Connection from unix socket cannot be traced back to origin.\n"
+    else
+        show_remote_data "$blocked_ip" "$blocked_port" | sed 's/^/    - /'
+    fi
+
+    locking_queries="$( psql -qAtX -P null=NULL -F$'\t' -c "
+        SELECT
+            b.locktype,
+            b.relation::regclass,
+            b.classid,
+            b.objid,
+            b.objsubid,
+            b.virtualxid,
+            b.transactionid,
+            extract(epoch from now() - a.query_start)::int8,
+            a.procpid,
+            regexp_replace(current_query, E'\\\\n', ' ', 'g'),
+            a.query_start::timestamp(0),
+            coalesce(host(a.client_addr)::text, 'unix socket'),
+            coalesce(a.client_port::text, 'internal connection'),
+            a.usename,
+            a.application_name,
+            a.xact_start::timestamp(0),
+            a.backend_start::timestamp(0)
+        FROM pg_database d join pg_locks b on d.oid = b.database JOIN pg_locks l ON b.database = l.database and 
+        (
+            ( b.locktype = 'relation' and b.relation = l.relation )
+            OR
+            ( b.locktype = 'advisory' and b.classid = l.classid and b.objid = l.objid and b.objsubid = l.objsubid )
+            OR
+            ( b.locktype = 'virtualxid' and b.virtualxid = l.virtualxid )
+            OR
+            ( b.locktype = 'transactionid' AND b.transactionid = l.transactionid )
+        ) join pg_stat_activity a on l.pid = a.procpid
+        WHERE b.pid = $blocked_pid AND not b.granted AND l.granted and d.datname = current_database()
+        ORDER BY a.xact_start asc
+    " )"
+
+    if [[ -z "$locking_queries" ]]
+    then
+        echo "  SORRY, cannot find why it's locked."
+        echo
+        continue
+    fi
+    echo "  - Locked because of:"
+    while IFS=$'\t' read -r lock_type lock_table lock_class lock_objid lock_objsubid lock_virtualxid lock_transactionid locking_runtime locking_pid locking_query locking_start locking_ip locking_port locking_user locking_app locking_xact_start locking_backend_start
+    do
+        printf "    - Query: %s\n" "$locking_query"
+
+        printf "      - Keep lock of type: %s on " "$lock_type"
+        if [[ "$lock_type" == "relation" ]]
+        then
+            printf "table %s" "$lock_table"
+        elif [[ "$lock_type" == "advisory" ]]
+        then
+            printf "values (%d, %d) (type %d)" "$lock_class" "$lock_objid" "$lock_objsubid"
+        elif [[ "$lock_type" == "virtualxid" ]]
+        then
+            printf "virtual transaction #%s" "$lock_virtualxid"
+        elif [[ "$lock_type" == "transactionid" ]]
+        then
+            printf "transaction #%s" "$lock_transactionid"
+        fi
+        echo
+
+        printf "      - Running for %d seconds.\n" "$locking_runtime"
+        printf "      - Backend / transaction / query start: %s / %s / %s\n" "$locking_backend_start" "$locking_xact_start" "$locking_start"
+        printf "      - locking user and application: %s / %s\n" "$locking_user" "$locking_app"
+        printf "      - Connection from: %s (remote port %s)\n" "$locking_ip" "$locking_port"
+        if [[ "$locking_ip" == "unix socket" ]]
+        then
+            printf "        - Connection from unix socket cannot be traced back to origin.\n"
+        else
+            show_remote_data "$locking_ip" "$locking_port" | sed 's/^/        - /'
+        fi
+    done <<< "$locking_queries"
+
+    echo
+done <<< "$locked_queries"
