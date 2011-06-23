@@ -1,0 +1,518 @@
+#!/usr/bin/env perl
+package main;
+use strict;
+use warnings;
+my $program = Omni::Program::Pg::FastDump->new();
+$program->run();
+exit;
+
+package Omni::Program::Pg::FastDump;
+use strict;
+use warnings;
+use Carp qw( croak carp );
+use English qw( -no_match_vars );
+use Getopt::Long qw( :config no_ignore_case );
+use Data::Dumper;
+use Cwd qw( abs_path );
+use Pod::Usage;
+use POSIX qw( :sys_wait_h );
+use File::Spec;
+use File::Temp qw( tempfile );
+
+our @killed_pids = ();
+
+sub REAPER {
+    my $child;
+    while ( ( $child = waitpid( -1, WNOHANG ) ) > 0 ) {
+        push @killed_pids, $child;
+    }
+    $SIG{ 'CHLD' } = \&REAPER;
+    return;
+}
+
+sub new {
+    my $class = shift;
+    my $self  = {};
+    bless $self, $class;
+    return $self;
+}
+
+sub run {
+    my $self = shift;
+
+    $self->read_options();
+    $self->show_running_details();
+    $self->confirm_work();
+    $self->make_dump();
+    return;
+}
+
+sub make_dump {
+    my $self = shift;
+    $self->dump_schema();
+    $self->get_list_of_tables();
+    $self->split_tables_into_blobs();
+    $self->order_blobs();
+    $self->launch_dumpers();
+    return;
+}
+
+sub launch_dumpers {
+    my $self = shift;
+    $OUTPUT_AUTOFLUSH = 1;
+    $SIG{ 'CHLD' } = \&REAPER;
+
+    my %c = map { ( $_ => 0 ) } qw( total partial full );
+    for my $t ( @{ $self->{ 'blobs' } } ) {
+        $c{ 'total' }++;
+        $c{ $t->{ 'blob_type' } }++;
+    }
+
+    open my $fh, ">", File::Spec->catfile( $self->{'output'}, 'index.lst' ) or croak( "Cannot create index file: $OS_ERROR\n" );
+    print $fh Dumper( $self->{ 'blobs' } );
+    close $fh;
+
+    printf "%d blobs to be processed. %d full and %d partial.\n", @c{ qw( total full partial ) };
+    my %running_kids = ();
+    while ( 1 ) {
+        while ( my $killed = shift @killed_pids ) {
+            delete $running_kids{ $killed };
+        }
+        while ( $self->{ 'jobs' } > scalar keys %running_kids ) {
+            last if 0 == scalar @{ $self->{ 'blobs' } };
+            my $blob = shift @{ $self->{ 'blobs' } };
+            my $pid  = fork();
+            croak "cannot fork" unless defined $pid;
+            if ( $pid == 0 ) {
+
+                # It's worker process.
+                delete $SIG{ 'CHLD' };
+                $self->make_single_blob( $blob );
+                exit;
+            }
+
+            # It's master.
+            $running_kids{ $pid } = $blob;
+        }
+
+        my %what_runs = map { ( $_ => 0 ) } qw( total partial full );
+        for my $t ( values %running_kids ) {
+            $what_runs{ 'total' }++;
+            $what_runs{ $t->{ 'blob_type' } }++;
+        }
+        my %what_waits = map { ( $_ => 0 ) } qw( total partial full );
+        for my $t ( @{ $self->{ 'blobs' } } ) {
+            $what_waits{ 'total' }++;
+            $what_waits{ $t->{ 'blob_type' } }++;
+        }
+        printf 'Running: %3d workers (%3d full, %5d partial). Pending: %3d blobs (%3d full, %5d partial).%s',
+            $what_runs{ 'total' },
+            $what_runs{ 'full' },
+            $what_runs{ 'partial' },
+            $what_waits{ 'total' }, $what_waits{ 'full' }, $what_waits{ 'partial' }, "     \r",    # just some spaces to clean leftover chars, and rewind to beginning of line
+            ;
+        last if ( 0 == $what_runs{ 'total' } ) && ( 0 == $what_waits{ 'total' } );
+        sleep 60;                                                                                  # sleep will get interrupted when child exits, and then the loop will repeat.
+    }
+    printf '%sAll done.%s', "\n", "\n";
+    return;
+}
+
+sub make_single_blob {
+    my $self = shift;
+    my $blob = shift;
+
+    my $file_name = $self->get_file_name( $blob );
+    $PROGRAM_NAME .= ' ... ' . $file_name;
+
+    my $output_path = File::Spec->catfile( $self->{ 'output' }, $file_name );
+    my $sql_filename = $output_path . '.sql';
+    open my $sql_fh, '>', $sql_filename or croak( "Cannot write to $sql_filename: $OS_ERROR\n" );
+
+    if ( $blob->{ 'blob_type' } eq 'partial' ) {
+        print $sql_fh "set enable_seqscan = false;\n";
+        printf $sql_fh 'COPY (SELECT * FROM %s WHERE %s) TO stdout;%s', $blob->{ 'full_name' }, $blob->{ 'condition' }, "\n";
+        $PROGRAM_NAME = 'Partial dump of ' . $blob->{ 'full_name' };
+    }
+    else {
+        printf $sql_fh 'COPY %s TO stdout;%s', $blob->{ 'full_name' }, "\n";
+        $PROGRAM_NAME = 'Full dump of ' . $blob->{ 'full_name' };
+    }
+    close $sql_fh;
+
+    my @cmd = ( $self->{ 'psql' }, '-qAtX', '-f', $sql_filename, );
+
+    my $psql_call = join( ' ', map { quotemeta } @cmd );
+    if ( $self->{ 'compressor' } ) {
+        $psql_call .= ' | ' . quotemeta( $self->{ 'compressor' } ) . ' -c -';
+    }
+
+    my ( $stderr_fh, $stderr_filename ) = tempfile( 'fast.dump.XXXXXXXX', 'TMPDIR' => 1, );
+
+    $psql_call .= sprintf ' 2>%s >%s', quotemeta $stderr_filename, quotemeta $output_path;
+
+    system $psql_call;
+    local $/ = undef;
+    my $stderr = <$stderr_fh>;
+
+    close $stderr_fh;
+    unlink( $stderr_filename );
+
+    my $error_code;
+    if ( $CHILD_ERROR == -1 ) {
+        $error_code = $OS_ERROR;
+    }
+    elsif ( $CHILD_ERROR & 127 ) {
+        $error_code = sprintf "child died with signal %d, %s coredump\n", ( $CHILD_ERROR & 127 ), ( $CHILD_ERROR & 128 ) ? 'with' : 'without';
+    }
+    else {
+        $error_code = $CHILD_ERROR >> 8;
+    }
+
+    croak( "\nCouldn't run $psql_call : " . $stderr ) if $error_code;
+    return;
+}
+
+sub get_file_name {
+    my $self = shift;
+    my $blob = shift;
+
+    my @output_parts = ( 'data', $blob->{ 'schema' }, $blob->{ 'table' }, $blob->{ 'id' }, 'dump' );
+
+    for my $part ( @output_parts ) {
+        $part =~ s/([^a-zA-Z0-9])/sprintf "_%02x", ord( $1 )/ges;
+    }
+
+    my $output = join '.', @output_parts;
+
+    return $output;
+}
+
+sub order_blobs {
+    my $self  = shift;
+    my $i     = 0;
+    my @blobs = map { $_->{ 'id' } = $i++; $_ } sort { $b->{ 'size' } <=> $a->{ 'size' } || $a->{ 'table' } cmp $b->{ 'table' } } @{ $self->{ 'blobs' } };
+    $self->{ 'blobs' } = \@blobs;
+    return;
+}
+
+sub split_tables_into_blobs {
+    my $self = shift;
+
+    my @to_split = ();
+    my @blobs    = ();
+    my %oids     = ();
+
+    while ( my ( $schema_name, $tables_hash ) = each %{ $self->{ 'tables' } } ) {
+        while ( my ( $table_name, $table_data ) = each %{ $tables_hash } ) {
+            if ( $table_data->{ 'size' } <= $self->{ 'max-size' } ) {
+                $table_data->{ 'blob_type' } = 'full';
+                push @blobs, $table_data;
+                next;
+            }
+            push @to_split, $table_data;
+            $oids{ $table_data->{ 'oid' } } = $table_data;
+        }
+    }
+    if ( 0 == scalar @to_split ) {
+        $self->{ 'blobs' } = \@blobs;
+        return;
+    }
+    my $oids = join( ',', map { $_->{ 'oid' } } @to_split );
+
+    my $pkey_columns = $self->psql(
+"select distinct on (i.indrelid) i.indrelid, a.attnum, a.attname, t.typname from pg_index i join pg_attribute a on i.indexrelid = a.attrelid join pg_type t on a.atttypid = t.oid where indrelid = ANY('{$oids}'::oid[]) and indisprimary order by i.indrelid, a.attnum"
+    );
+    croak( "pkey_columns is not arrayref? Something is wrong!" ) unless 'ARRAY' eq ref $pkey_columns;
+    croak( "pkey_columns is not arrayref of arrayrefs? Something is wrong!" ) unless 'ARRAY' eq ref $pkey_columns->[ 0 ];
+
+    my ( $sql_fh, $sql_filename ) = tempfile( 'fast.dump.XXXXXXXX', 'TMPDIR' => 1, );
+
+    for my $row ( @{ $pkey_columns } ) {
+        $oids{ $row->[ 0 ] }->{ 'partition_key' }    = $row->[ 2 ];
+        $oids{ $row->[ 0 ] }->{ 'partition_values' } = [];
+        my $sql_query = sprintf q{
+            SELECT
+                s2.starelid,
+                quote_literal(s2.vals[i])
+            FROM
+                (
+                    SELECT
+                        s1.*,
+                        generate_series( array_lower( s1.vals, 1 ), array_upper( s1.vals, 1 ) ) as i
+                    FROM
+                        (
+                            SELECT
+                                s.starelid,
+                                case
+                                when s.stakind1 = 2 THEN stavalues1
+                                when s.stakind2 = 2 THEN stavalues2
+                                when s.stakind3 = 2 THEN stavalues3
+                                when s.stakind4 = 2 THEN stavalues4
+                                ELSE NULL
+                                END::TEXT::%s[] as vals
+                            FROM
+                                pg_statistic s
+                            WHERE
+                                s.starelid = %d
+                                AND staattnum = %d
+                                AND ( 2 = s.stakind1 OR 2 = s.stakind2 OR 2 = s.stakind3 OR 2=s.stakind4)
+                        ) as s1
+                ) as s2
+            ORDER BY s2.starelid, s2.vals[i];%s}, @{ $row }[ 3, 0, 1 ], "\n";
+        print $sql_fh $sql_query;
+    }
+    close $sql_fh;
+
+    my $partitions = $self->psql( '\i ' . $sql_filename );
+    unlink $sql_filename;
+
+    for my $row ( @{ $partitions } ) {
+        push @{ $oids{ $row->[ 0 ] }->{ 'partition_values' } }, $row->[ 1 ];
+    }
+
+    for my $table ( @to_split ) {
+        if ( !defined $table->{ 'partition_key' } ) {
+            $table->{ 'blob_type' } = 'full';
+            push @blobs, $table;
+            next;
+        }
+        for my $i ( 0 .. $#{ $table->{ 'partition_values' } } ) {
+            my $blob = {};
+            @{ $blob }{ keys %{ $table } } = ( values %{ $table } );
+            delete $blob->{ 'partition_key' };
+            delete $blob->{ 'partition_values' };
+            $blob->{ 'blob_type' } = 'partial';
+            if ( $i == 0 ) {
+                $blob->{ 'condition' } = sprintf "%s < %s", $table->{ 'partition_key' }, $table->{ 'partition_values' }->[ $i ];
+                $blob->{ 'size' } = 0;
+            }
+            else {
+                $blob->{ 'condition' } = sprintf "%s >= %s and %s < %s", $table->{ 'partition_key' }, $table->{ 'partition_values' }->[ $i - 1 ], $table->{ 'partition_key' },
+                    $table->{ 'partition_values' }->[ $i ];
+                $blob->{ 'size' } /= ( scalar( @{ $table->{ 'partition_values' } } ) - 1 );
+            }
+            push @blobs, $blob;
+        }
+        $table->{ 'blob_type' } = 'partial';
+        $table->{ 'size' } /= ( scalar( @{ $table->{ 'partition_values' } } ) - 1 );
+        $table->{ 'condition' } = sprintf "%s >= %s", $table->{ 'partition_key' }, $table->{ 'partition_values' }->[ -1 ];
+        delete $table->{ 'partition_key' };
+        delete $table->{ 'partition_values' };
+        push @blobs, $table;
+    }
+    $self->{ 'blobs' } = \@blobs;
+    delete $self->{ 'tables' };
+    return;
+}
+
+sub get_list_of_tables {
+    my $self = shift;
+
+    my $restored = $self->run_command( $self->{ 'pg_restore' }, '-l', File::Spec->catfile( $self->{ 'output' }, 'schema.dump' ) );
+
+    my @lines = split /\r?\n/, $restored;
+    my %tables = ();
+    for my $line ( @lines ) {
+        next unless $line =~ m{\A\d+;\s+\d+\s+\d+\s+TABLE\s+(\S+)\s+(\S+)\s+};
+        $tables{ $1 }->{ $2 } = { 'schema' => $1, 'table' => $2, };
+    }
+    if ( 0 == scalar keys %tables ) {
+        print "This dump doesn't contain any tables.\n";
+        exit 0;
+    }
+
+    my $db_sizes = $self->psql(
+"SELECT n.nspname, c.relname, c.oid::regclass, c.oid, cast( pg_relation_size(c.oid) / ( 1024 * 1024 ) as int8 ) from pg_class c join pg_namespace n on c.relnamespace = n.oid where c.relkind = 'r'"
+    );
+
+    @lines = split /\r?\n/, $db_sizes;
+    for my $row ( @{ $db_sizes } ) {
+        my ( $schema, $table, $full_name, $oid, $size ) = @{ $row };
+        next unless exists $tables{ $schema };
+        next unless exists $tables{ $schema }->{ $table };
+        $tables{ $schema }->{ $table }->{ 'full_name' } = $full_name;
+        $tables{ $schema }->{ $table }->{ 'size' }      = $size;
+        $tables{ $schema }->{ $table }->{ 'oid' }       = $oid;
+    }
+
+    $self->{ 'tables' } = \%tables;
+    return;
+}
+
+sub dump_schema {
+    my $self = shift;
+    $self->run_command( $self->{ 'pg_dump' }, '-Fc', '-f', File::Spec->catfile( $self->{ 'output' }, 'schema.dump' ), '-s', '-v' );
+    return;
+}
+
+sub confirm_work {
+    my $self = shift;
+    printf "\n\nAre you sure you want to continue?\n";
+    printf "Please remember that any other ( aside from $PROGRAM_NAME ) connections to database can cause dump corruption!\n";
+    printf "Enter YES to continue: ";
+    my $input = <STDIN>;
+    exit unless $input =~ m{\AYES\r?\n?\z};
+    return;
+}
+
+sub show_running_details {
+    my $self = shift;
+
+    my $db = $self->psql( 'SELECT current_user, current_database()' );
+
+    my $largest_tables = $self->psql(
+"SELECT * FROM ( SELECT rpad(oid::regclass::text, 32) || ' (' || pg_size_pretty(pg_relation_size(oid)) || ')' from pg_class where relkind = 'r' order by pg_relation_size(oid) desc limit 5) x order by 1"
+    );
+
+    my @tables = map { $_->[ 0 ] } @{ $largest_tables };
+
+    printf "Config:\n";
+    for my $key ( sort keys %{ $self } ) {
+        printf "%-10s : %s\n", $key, $self->{ $key };
+    }
+
+    printf "\nDatabase details:\n";
+    printf "User          : %s\n", $db->[ 0 ]->[ 0 ];
+    printf "Database      : %s\n", $db->[ 0 ]->[ 1 ];
+    printf "Sample tables : %s\n", shift @tables;
+    printf "              - %s\n", $_ for @tables;
+    return;
+}
+
+sub read_options {
+    my $self = shift;
+
+    my $opts = {
+        'psql'       => 'psql',
+        'pg_dump'    => 'pg_dump',
+        'pg_restore' => 'pg_restore',
+        'output'     => '.',
+        'jobs'       => 1,
+        'max-size'   => 10,
+    };
+    my $is_ok = GetOptions( $opts, qw( help|? output|o=s compressor|c=s jobs|j=i max-size|m=i pg_dump|d=s pg_restore|r=s ) );
+    pod2usage( '-verbose' => 1, ) unless $is_ok;
+    pod2usage( '-verbose' => 99, '-sections' => [ qw( DESCRIPTION SYNOPSIS OPTIONS ) ] ) if $opts->{ 'help' };
+
+    pod2usage( '-message' => 'Output directory has to be given.' ) if !$opts->{ 'output' };
+    pod2usage( '-message' => 'Output directory does not exist.' )  if !-e $opts->{ 'output' };
+    pod2usage( '-message' => 'Output is not directory.' )          if !-d $opts->{ 'output' };
+    pod2usage( '-message' => 'Output directory is not writable.' ) if !-w $opts->{ 'output' };
+
+    pod2usage( '-message' => 'Number of jobs has to be not-empty.' ) if '' eq $opts->{ 'jobs' };
+    $opts->{ 'jobs' } = int( $opts->{ 'jobs' } );
+    pod2usage( '-message' => 'Number of jobs cannot be less than 1.' )   if 1 > $opts->{ 'jobs' };
+    pod2usage( '-message' => 'Number of jobs cannot be more than 100.' ) if 100 < $opts->{ 'jobs' };
+
+    pod2usage( '-message' => 'Max-size has to be not-empty.' ) if '' eq $opts->{ 'max-size' };
+    $opts->{ 'max-size' } = int( $opts->{ 'max-size' } );
+    pod2usage( '-message' => 'Max-size cannot be less than 1.' ) if 1 > $opts->{ 'max-size' };
+
+    $opts->{ 'output' } = abs_path( $opts->{ 'output' } );
+    @{ $self }{ keys %{ $opts } } = values %{ $opts };
+    return;
+}
+
+sub psql {
+    my $self   = shift;
+    my $query  = shift;
+    my $output = $self->run_command( $self->{ 'psql' }, '-qAtX', '-F', "\t", '-c', $query, );
+    my @rows   = grep { '' ne $_ } split /\r?\n/, $output;
+    my @data   = map { [ split /\t/, $_ ] } @rows;
+    return \@data;
+}
+
+sub run_command {
+    my $self = shift;
+    my ( @cmd ) = @_;
+
+    my $real_command = join( ' ', map { quotemeta } @cmd );
+
+    my ( $stdout_fh, $stdout_filename ) = tempfile( 'fast.dump.XXXXXXXX', 'TMPDIR' => 1, );
+    my ( $stderr_fh, $stderr_filename ) = tempfile( 'fast.dump.XXXXXXXX', 'TMPDIR' => 1, );
+
+    $real_command .= sprintf ' 2>%s >%s', quotemeta $stderr_filename, quotemeta $stdout_filename;
+
+    system $real_command;
+    local $/ = undef;
+    my $stdout = <$stdout_fh>;
+    my $stderr = <$stderr_fh>;
+
+    close $stdout_fh;
+    close $stderr_fh;
+
+    unlink( $stdout_filename, $stderr_filename );
+
+    my $error_code;
+    if ( $CHILD_ERROR == -1 ) {
+        $error_code = $OS_ERROR;
+    }
+    elsif ( $CHILD_ERROR & 127 ) {
+        $error_code = sprintf "child died with signal %d, %s coredump\n", ( $CHILD_ERROR & 127 ), ( $CHILD_ERROR & 128 ) ? 'with' : 'without';
+    }
+    else {
+        $error_code = $CHILD_ERROR >> 8;
+    }
+
+    croak( "Couldn't run $real_command : " . $stderr ) if $error_code;
+
+    return $stdout;
+}
+
+=head1 NAME
+
+fast.dump - Program to do very fast dumps of PostgreSQL database
+
+=head1 SYNOPSIS
+
+fast.dump [--output=directory/] [--compressor=/usr/bin/gzip] [--jobs=n] [--max-size=n] [--psql=/usr/bin/psql] [--pg_dump=/usr/bin/pg_dump] [--pg_restore=/usr/bin/pg_restore] [--help]
+
+=head1 OPTIONS
+
+=over
+
+=item --output - Directory where to output dump files. Defaults to current directory.
+
+=item --compressor - path to compressor that should be used to compress
+data. Default is empty, which doesn't compress, and you'll usually want
+something like gzip.
+
+=item --jobs - how many concurrent processes to run when dumping data to
+tables. Defaults to 1.
+
+=item --max-size - Minimal size of table (pg_relation_size()) (in megabytes)
+before fast.dump will try to split it into many separate blocks. Defaults to
+10.
+
+=item --psql - path to psql program. Defaults to "psql", which will use
+$PATH environment variable to find it.
+
+=item --pg_dump - path to pg_dump program. Defaults to "pg_dump", which will
+use $PATH environment variable to find it.
+
+=item --pg_restore - path to pg_restore program. Defaults to "pg_restore",
+which will use $PATH environment variable to find it.
+
+=item --help - shows information about usage of the program.
+
+=back
+
+All options can be given in abbreviated version, using single dash character
+and first letter of option, like:
+
+    fast.dump -o /tmp -c bzip2 -j 16
+
+Database connection details should be given using PG* environment variables.
+
+=head1 DESCRIPTION
+
+fast.dump is used to make very fast, although requiring special attention,
+database dumps.
+
+It works with PostgreSQL database, and will produce consistent dump only if
+there are no other connections to datbaase (other than fast.dump itself).
+
+Generated dumps have form of directory with many files inside, and should be
+loaded using fast.restore counterpart tool.
+
