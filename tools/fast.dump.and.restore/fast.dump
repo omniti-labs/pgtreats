@@ -69,7 +69,7 @@ sub launch_dumpers {
     }
 
     open my $fh, ">", File::Spec->catfile( $self->{ 'output' }, 'index.lst' ) or croak( "Cannot create index file: $OS_ERROR\n" );
-    printf $fh '%-5s | %-7s | %-32s | %-32s | %s%s', qw( # type schema table condition ), "\n";
+    printf $fh '%-5s | %-7s | %-32s | %-32s | %s%s', '#', qw( type schema table condition ), "\n";
     for my $i ( @{ $self->{'blobs'} } ) {
         printf $fh '%5d | %-7s | %-32s | %-32s | %s%s', @{ $i }{ qw( id blob_type schema table ) }, ( $i->{'condition'} || '' ), "\n";
     }
