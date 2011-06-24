@@ -391,7 +391,7 @@ sub read_options {
         'jobs'       => 1,
         'max-size'   => 10,
     };
-    my $is_ok = GetOptions( $opts, qw( help|? output|o=s compressor|c=s jobs|j=i max-size|m=i pg_dump|d=s pg_restore|r=s ) );
+    my $is_ok = GetOptions( $opts, qw( help|? output|o=s compressor|c=s jobs|j=i max-size|m=i psql|p=s pg_dump|d=s pg_restore|r=s ) );
     pod2usage( '-verbose' => 1, ) unless $is_ok;
     pod2usage( '-verbose' => 99, '-sections' => [ qw( DESCRIPTION SYNOPSIS OPTIONS ) ] ) if $opts->{ 'help' };
 
