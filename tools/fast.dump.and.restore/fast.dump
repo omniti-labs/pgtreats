@@ -69,9 +69,9 @@ sub launch_dumpers {
     }
 
     open my $fh, ">", File::Spec->catfile( $self->{ 'output' }, 'index.lst' ) or croak( "Cannot create index file: $OS_ERROR\n" );
-    printf $fh '%-5s | %-7s | %-32s | %-32s | %s%s', '#', qw( type schema table condition ), "\n";
+    printf $fh '%-5s | %-7s | %-32s | %-32s | %-10s | %s%s', '#', qw( type schema table size condition ), "\n";
     for my $i ( @{ $self->{'blobs'} } ) {
-        printf $fh '%5d | %-7s | %-32s | %-32s | %s%s', @{ $i }{ qw( id blob_type schema table ) }, ( $i->{'condition'} || '' ), "\n";
+        printf $fh '%5d | %-7s | %-32s | %-32s | %-10s | %s%s', @{ $i }{ qw( id blob_type schema table size ) }, ( $i->{'condition'} || '' ), "\n";
     }
 
     printf "%d blobs to be processed. %d full and %d partial.\n", @c{ qw( total full partial ) };
@@ -80,6 +80,7 @@ sub launch_dumpers {
         my @pids = keys %killed_pids;
         for my $killed ( @pids ) {
             my $blob     = delete $running_kids{ $killed };
+            next unless $blob;
             my $end_time = delete $killed_pids{ $killed };
             printf $fh "%s dump (#%d) of %s.%s finished after %d seconds.\n", $blob->{ 'blob_type' }, $blob->{ 'id' }, $blob->{ 'schema' }, $blob->{ 'table' }, $end_time - $blob->{ 'started' };
         }
@@ -255,6 +256,10 @@ sub split_tables_into_blobs {
                                 when s.stakind2 = 2 THEN stavalues2
                                 when s.stakind3 = 2 THEN stavalues3
                                 when s.stakind4 = 2 THEN stavalues4
+                                when s.stakind1 = 1 THEN stavalues1
+                                when s.stakind2 = 1 THEN stavalues2
+                                when s.stakind3 = 1 THEN stavalues3
+                                when s.stakind4 = 1 THEN stavalues4
                                 ELSE NULL
                                 END::TEXT::%s[] as vals
                             FROM
@@ -262,7 +267,7 @@ sub split_tables_into_blobs {
                             WHERE
                                 s.starelid = %d
                                 AND staattnum = %d
-                                AND ( 2 = s.stakind1 OR 2 = s.stakind2 OR 2 = s.stakind3 OR 2=s.stakind4)
+                                AND ( 2 in (s.stakind1, s.stakind2, s.stakind3, s.stakind4) OR 1 in (s.stakind1, s.stakind2, s.stakind3, s.stakind4) )
                         ) as s1
                 ) as s2
             ORDER BY s2.starelid, s2.vals[i];%s}, @{ $row }[ 3, 0, 1 ], "\n";
@@ -278,7 +283,10 @@ sub split_tables_into_blobs {
     }
 
     for my $table ( @to_split ) {
-        if ( !defined $table->{ 'partition_key' } ) {
+        if (
+            ( !defined $table->{ 'partition_values' } ) ||
+            ( 0 == scalar @{ $table->{ 'partition_values' } } )
+        ) {
             $table->{ 'blob_type' } = 'full';
             push @blobs, $table;
             next;
@@ -302,6 +310,12 @@ sub split_tables_into_blobs {
         }
         $table->{ 'blob_type' } = 'partial';
         $table->{ 'size' } /= ( scalar( @{ $table->{ 'partition_values' } } ) - 1 );
+        if ( !defined $table->{'partition_values'}->[-1] ) {
+            print Dumper( $table ) . "PV\n";
+        }
+        if ( !defined $table->{'partition_key'} ) {
+            print Dumper( $table ) . "PK\n";
+        }
         $table->{ 'condition' } = sprintf "%s >= %s", $table->{ 'partition_key' }, $table->{ 'partition_values' }->[ -1 ];
         delete $table->{ 'partition_key' };
         delete $table->{ 'partition_values' };
@@ -329,7 +343,32 @@ sub get_list_of_tables {
     }
 
     my $db_sizes = $self->psql(
-"SELECT n.nspname, c.relname, c.oid::regclass, c.oid, cast( pg_relation_size(c.oid) / 1024 as int8 ) from pg_class c join pg_namespace n on c.relnamespace = n.oid where c.relkind = 'r'"
+"
+    SELECT
+        n.nspname,
+        c.relname,
+        c.oid::regclass,
+        c.oid,
+        cast(
+            (
+                pg_relation_size(c.oid)
+                +
+                (
+                    CASE
+                        WHEN tn.oid IS NOT NULL THEN pg_relation_size( tc.oid )
+                        ELSE 0
+                    END
+                )
+            ) / 1024 as int8
+        )
+    FROM
+        pg_class c
+        join pg_namespace n on c.relnamespace = n.oid
+        left outer join pg_class tc on tc.relname = 'pg_toast_' || c.oid
+        left outer join pg_namespace tn on tc.relnamespace = tn.oid and tn.nspname = 'pg_toast'
+    WHERE
+        c.relkind = 'r'
+"
     );
 
     @lines = split /\r?\n/, $db_sizes;
