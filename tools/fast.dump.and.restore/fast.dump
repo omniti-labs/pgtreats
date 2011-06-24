@@ -329,7 +329,7 @@ sub get_list_of_tables {
     }
 
     my $db_sizes = $self->psql(
-"SELECT n.nspname, c.relname, c.oid::regclass, c.oid, cast( pg_relation_size(c.oid) / ( 1024 * 1024 ) as int8 ) from pg_class c join pg_namespace n on c.relnamespace = n.oid where c.relkind = 'r'"
+"SELECT n.nspname, c.relname, c.oid::regclass, c.oid, cast( pg_relation_size(c.oid) / 1024 as int8 ) from pg_class c join pg_namespace n on c.relnamespace = n.oid where c.relkind = 'r'"
     );
 
     @lines = split /\r?\n/, $db_sizes;
@@ -395,7 +395,7 @@ sub read_options {
         'pg_restore' => 'pg_restore',
         'output'     => '.',
         'jobs'       => 1,
-        'max-size'   => 10,
+        'max-size'   => 10240,
     };
     my $is_ok = GetOptions( $opts, qw( help|? output|o=s compressor|c=s jobs|j=i max-size|m=i psql|p=s pg_dump|d=s pg_restore|r=s ) );
     pod2usage( '-verbose' => 1, ) unless $is_ok;
@@ -487,9 +487,9 @@ something like gzip.
 =item --jobs - how many concurrent processes to run when dumping data to
 tables. Defaults to 1.
 
-=item --max-size - Minimal size of table (pg_relation_size()) (in megabytes)
+=item --max-size - Minimal size of table (pg_relation_size()) (in kilobytes)
 before fast.dump will try to split it into many separate blocks. Defaults to
-10.
+10240 (10MB).
 
 =item --psql - path to psql program. Defaults to "psql", which will use
 $PATH environment variable to find it.
