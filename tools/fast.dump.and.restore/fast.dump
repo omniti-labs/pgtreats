@@ -19,12 +19,12 @@ use POSIX qw( :sys_wait_h );
 use File::Spec;
 use File::Temp qw( tempfile );
 
-our @killed_pids = ();
+our %killed_pids = ();
 
 sub REAPER {
     my $child;
     while ( ( $child = waitpid( -1, WNOHANG ) ) > 0 ) {
-        push @killed_pids, $child;
+        $killed_pids{ $child } = time();
     }
     $SIG{ 'CHLD' } = \&REAPER;
     return;
@@ -68,15 +68,20 @@ sub launch_dumpers {
         $c{ $t->{ 'blob_type' } }++;
     }
 
-    open my $fh, ">", File::Spec->catfile( $self->{'output'}, 'index.lst' ) or croak( "Cannot create index file: $OS_ERROR\n" );
-    print $fh Dumper( $self->{ 'blobs' } );
-    close $fh;
+    open my $fh, ">", File::Spec->catfile( $self->{ 'output' }, 'index.lst' ) or croak( "Cannot create index file: $OS_ERROR\n" );
+    printf $fh '%-5s | %-7s | %-32s | %-32s | %s%s', qw( # type schema table condition ), "\n";
+    for my $i ( @{ $self->{'blobs'} } ) {
+        printf $fh '%5d | %-7s | %-32s | %-32s | %s%s', @{ $i }{ qw( id blob_type schema table ) }, ( $i->{'condition'} || '' ), "\n";
+    }
 
     printf "%d blobs to be processed. %d full and %d partial.\n", @c{ qw( total full partial ) };
     my %running_kids = ();
     while ( 1 ) {
-        while ( my $killed = shift @killed_pids ) {
-            delete $running_kids{ $killed };
+        my @pids = keys %killed_pids;
+        for my $killed ( @pids ) {
+            my $blob     = delete $running_kids{ $killed };
+            my $end_time = delete $killed_pids{ $killed };
+            printf $fh "%s dump (#%d) of %s.%s finished after %d seconds.\n", $blob->{ 'blob_type' }, $blob->{ 'id' }, $blob->{ 'schema' }, $blob->{ 'table' }, $end_time - $blob->{ 'started' };
         }
         while ( $self->{ 'jobs' } > scalar keys %running_kids ) {
             last if 0 == scalar @{ $self->{ 'blobs' } };
@@ -92,6 +97,7 @@ sub launch_dumpers {
             }
 
             # It's master.
+            $blob->{ 'started' } = time();
             $running_kids{ $pid } = $blob;
         }
 
@@ -362,7 +368,7 @@ sub show_running_details {
     my $db = $self->psql( 'SELECT current_user, current_database()' );
 
     my $largest_tables = $self->psql(
-"SELECT * FROM ( SELECT rpad(oid::regclass::text, 32) || ' (' || pg_size_pretty(pg_relation_size(oid)) || ')' from pg_class where relkind = 'r' order by pg_relation_size(oid) desc limit 5) x order by 1"
+"SELECT * FROM ( SELECT rpad(oid::regclass::text, 32) || ' (' || pg_size_pretty(pg_relation_size(oid)) || ')' from pg_class where relkind = 'r' and relname !~ '^pg_' order by pg_relation_size(oid) desc limit 5) x order by 1"
     );
 
     my @tables = map { $_->[ 0 ] } @{ $largest_tables };
