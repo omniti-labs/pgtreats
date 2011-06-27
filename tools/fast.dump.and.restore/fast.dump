@@ -138,11 +138,15 @@ sub make_single_blob {
 
     if ( $blob->{ 'blob_type' } eq 'partial' ) {
         print $sql_fh "set enable_seqscan = false;\n";
+        printf $sql_fh "SELECT 'COPY %s FROM STDIN;';\n", $blob->{ 'full_name' };
         printf $sql_fh 'COPY (SELECT * FROM %s WHERE %s) TO stdout;%s', $blob->{ 'full_name' }, $blob->{ 'condition' }, "\n";
+        printf $sql_fh "SELECT E'\\\\.'\n";
         $PROGRAM_NAME = 'Partial dump of ' . $blob->{ 'full_name' };
     }
     else {
+        printf $sql_fh "SELECT 'COPY %s FROM STDIN;';\n", $blob->{ 'full_name' };
         printf $sql_fh 'COPY %s TO stdout;%s', $blob->{ 'full_name' }, "\n";
+        printf $sql_fh "SELECT E'\\\\.'\n";
         $PROGRAM_NAME = 'Full dump of ' . $blob->{ 'full_name' };
     }
     close $sql_fh;
