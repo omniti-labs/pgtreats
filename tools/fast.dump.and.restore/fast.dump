@@ -409,6 +409,14 @@ sub get_list_of_tables {
 sub dump_schema {
     my $self = shift;
     $self->run_command( $self->{ 'pg_dump' }, '-Fc', '-f', File::Spec->catfile( $self->{ 'output' }, 'schema.dump' ), '-s', '-v' );
+
+    my ( $sql_fh, $sql_filename ) = tempfile( 'fast.dump.XXXXXXXX', 'TMPDIR' => 1, );
+    print $sql_fh "\\o " . File::Spec->catfile( $self->{ 'output' }, 'index.sizes' ) . "\n";
+    print $sql_fh
+        "select n.nspname, c.relname, pg_relation_size(c.oid) from pg_class c join pg_namespace n on c.relnamespace = n.oid where c.relkind = 'i' and n.nspname !~ '^pg_' order by 3 desc;\n";
+    close $sql_fh;
+    $self->run_command( $self->{ 'psql' }, '-qAtX', '-F', "\t", '-f', $sql_filename );
+
     return;
 }
 
