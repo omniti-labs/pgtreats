@@ -417,6 +417,15 @@ sub dump_schema {
     close $sql_fh;
     $self->run_command( $self->{ 'psql' }, '-qAtX', '-F', "\t", '-f', $sql_filename );
 
+    open $sql_fh, '>', $sql_filename or croak( "Cannot re-write to $sql_filename: $OS_ERROR\n" );
+    print $sql_fh "\\o " . File::Spec->catfile( $self->{ 'output' }, 'fkeys.ordering' ) . "\n";
+    print $sql_fh
+"SELECT n.nspname, c.conname, c.conrelid::regclass, c.confrelid::regclass, pg_relation_size( c.conrelid ) + pg_relation_size( c.confrelid ) as tables_size FROM pg_constraint c JOIN pg_namespace n on c.connamespace = n.oid WHERE c.contype = 'f';\n";
+    close $sql_fh;
+
+    $self->run_command( $self->{ 'psql' }, '-qAtX', '-F', "\t", '-f', $sql_filename );
+    unlink $sql_filename;
+
     return;
 }
 
