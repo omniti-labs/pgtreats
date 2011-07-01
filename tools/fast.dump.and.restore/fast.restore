@@ -1,0 +1,656 @@
+#!/usr/bin/env perl
+package main;
+use strict;
+use warnings;
+my $program = Omni::Program::Pg::FastRestore->new();
+$program->run();
+exit;
+
+package Omni::Program::Pg::FastRestore;
+use strict;
+use warnings;
+use Carp qw( croak carp );
+use English qw( -no_match_vars );
+use Getopt::Long qw( :config no_ignore_case );
+use Data::Dumper;
+use Cwd qw( abs_path );
+use Pod::Usage;
+use POSIX qw( :sys_wait_h );
+use File::Spec;
+use File::Temp qw( tempfile tempdir );
+
+our %killed_pids = ();
+
+sub REAPER {
+    my $child;
+    while ( ( $child = waitpid( -1, WNOHANG ) ) > 0 ) {
+        $killed_pids{ $child } = $CHILD_ERROR;
+    }
+    $SIG{ 'CHLD' } = \&REAPER;
+    return;
+}
+
+sub load_dump {
+    my $self = shift;
+    $self->{ 'tmpdir' } = tempdir(
+        'fast.restore.XXXXXXXX',
+        'TMPDIR'  => 1,
+        'CLEANUP' => 1,
+    );
+    $self->get_list_from_schema();
+    $self->load_base_schema();
+    $self->load_data();
+    $self->get_tables_size();
+    $self->get_indexes_size();
+    $self->get_fkeys_size();
+    $self->create_constraints_and_indexes();
+    $self->create_foreign_keys();
+    $self->finish_schema();
+    return;
+}
+
+sub get_tables_size {
+    my $self = shift;
+    my $data = $self->psql( "SELECT n.nspname, c.relname, pg_relation_size( c.oid ) FROM pg_class c JOIN pg_namespace n on c.relnamespace = n.oid where c.relkind = 'r' and c.relname !~ '^pg_'" );
+    for my $i ( @{ $data } ) {
+        $self->{ 'size' }->{ $i->[ 0 ] }->{ $i->[ 1 ] } = $i->[ 2 ];
+    }
+    return;
+}
+
+sub get_indexes_size {
+    my $self = shift;
+    open my $fh, '<', File::Spec->catfile( $self->{ 'input' }, 'index.sizes' ) or croak( "Cannot open index.sizes in dump: $OS_ERROR\n" );
+    while ( my $l = <$fh> ) {
+        $l =~ s/\s*\z//;
+        my @c = split /\t/, $l;
+        $self->{ 'size' }->{ $c[ 0 ] }->{ $c[ 1 ] } = $c[ 2 ];
+    }
+    close $fh;
+    return;
+}
+
+sub get_fkeys_size {
+    my $self = shift;
+    open my $fh, '<', File::Spec->catfile( $self->{ 'input' }, 'fkeys.ordering' ) or croak( "Cannot open fkeys.ordering in dump: $OS_ERROR\n" );
+    while ( my $l = <$fh> ) {
+        $l =~ s/\s*\z//;
+        my @c = split /\t/, $l;
+        $self->{ 'fkeys' }->{ $c[ 0 ] }->{ $c[ 1 ] } = {
+            'tables' => [ sort ( $c[ 2 ], $c[ 3 ] ) ],
+            'size'   => $c[ 4 ],
+        };
+    }
+    close $fh;
+    return;
+}
+
+sub load_data {
+    my $self = shift;
+
+    $self->find_data_files_to_load();
+    $self->process_in_parallel(
+        'next_data' => sub { my $x = shift @{ $self->{ 'files' } }; return ( $x, $x ); },
+        'show_progress' => sub { return $self->show_progress_for_data_files(); },
+        'worker'        => sub { return $self->process_data_file( @_ ) },
+    );
+    return;
+}
+
+sub create_foreign_keys {
+    my $self = shift;
+    my @fk_lines = grep { 'FK' eq $_->{ 'type' } } @{ $self->{ 'list' } };
+    return if 0 == scalar @fk_lines;
+
+    for my $fk ( @fk_lines ) {
+        my @words = split /\s+/, $fk->{ 'line' };
+        my ( $schema, $fkey_name ) = @words[ 5, 6 ];
+        croak( "There is no meta info for fkey $schema.$fkey_name\n" ) unless $self->{ 'fkeys' }->{ $schema }->{ $fkey_name };
+        my $M = $self->{ 'fkeys' }->{ $schema }->{ $fkey_name };
+        @{ $fk }{ keys %{ $M } } = values %{ $M };
+        $fk->{ 'name' } = $schema . '.' . $fkey_name;
+    }
+    my @sorted = sort { $b->{ 'size' } <=> $a->{ 'size' } } @fk_lines;
+    $self->{ 'fkeys_list' } = \@sorted;
+
+    my $t = $self->{ 'jobs' };
+    $self->{ 'jobs' } = $self->{ 'fkey-jobs' };
+    $self->process_in_parallel(
+        'next_data' => sub { my $x = shift @{ $self->{ 'fkeys_list' } }; return unless defined $x; return ( $x->{ 'name' }, $x ) },
+        'show_progress' => sub { return $self->show_progress_for_fkeys(); },
+        'worker'        => sub { return $self->process_fkey( @_ ) },
+    );
+    $self->{ 'jobs' } = $t;
+    return;
+}
+
+sub create_constraints_and_indexes {
+    my $self = shift;
+    $self->make_list_of_constraints_and_indexes();
+    return unless defined $self->{ 'ic_list' };
+    $self->process_in_parallel(
+        'next_data' => sub { my $x = shift @{ $self->{ 'ic_list' } }; return unless defined $x; return ( $x->{ 'name' }, $x ) },
+        'show_progress' => sub { return $self->show_progress_for_ic_files(); },
+        'worker'        => sub { return $self->process_ic_file( @_ ) },
+    );
+    return;
+}
+
+sub make_list_of_constraints_and_indexes {
+    my $self = shift;
+    my @index_lines;
+    my @constraint_lines;
+    for my $i ( @{ $self->{ 'list' } } ) {
+        push @index_lines,      $i if $i->{ 'type' } eq 'INDEX';
+        push @constraint_lines, $i if $i->{ 'type' } eq 'CONSTRAINT';
+    }
+    return if ( 0 == scalar @index_lines ) && ( 0 == scalar @constraint_lines );
+    for my $i ( @index_lines, @constraint_lines ) {
+        my @c = split /\s+/, $i->{ 'line' };
+        my ( $schema, $name ) = @c[ 4, 5 ];
+        $i->{ 'name' } = $schema . '.' . $name;
+        if ( $self->{ 'size' }->{ $schema } ) {
+            if ( $self->{ 'size' }->{ $schema }->{ $name } ) {
+                $i->{ 'size' } = $self->{ 'size' }->{ $schema }->{ $name };
+            }
+            else {
+
+                # That would be pretty interesting to get in here
+                my $count = 0;
+                my $sum   = 0;
+                for my $j ( values %{ $self->{ 'size' }->{ $schema } } ) {
+                    $count++;
+                    $sum += $j;
+                }
+                $self->{ 'size' } = $sum / $count;    # Just an estimate, I can't figure out how we'd get in here anyway.
+            }
+        }
+        else {
+
+            # That would be pretty interesting to get in here, too
+            $i->{ 'size' } = 0;
+        }
+    }
+    my @all_lines = ();
+    push @all_lines, sort { $b->{ 'size' } <=> $a->{ 'size' } } @constraint_lines;
+    push @all_lines, sort { $b->{ 'size' } <=> $a->{ 'size' } } @index_lines;
+    $self->{ 'ic_list' } = \@all_lines;
+    return;
+}
+
+sub show_progress_for_data_files {
+    my $self = shift;
+    unless ( defined $self->{ 'files_count' } ) {
+        $self->{ 'files_count' } = scalar @{ $self->{ 'files' } };
+        return;
+    }
+    my $workers  = scalar keys %{ $self->{ 'kids' } };
+    my $in_queue = scalar @{ $self->{ 'files' } };
+    if (   ( 0 == $workers )
+        && ( 0 == $in_queue ) )
+    {
+        print "\nData loading done.\n";
+        return;
+    }
+    printf "%d data files loading. %d more to load. (total %d files to be processed).   \r", $workers, $in_queue, $self->{ 'files_count' };
+    return;
+}
+
+sub show_progress_for_fkeys {
+    my $self = shift;
+    unless ( defined $self->{ 'fkeys_count' } ) {
+        $self->{ 'fkeys_count' } = scalar @{ $self->{ 'fkeys_list' } };
+        return;
+    }
+    my $workers  = scalar keys %{ $self->{ 'kids' } };
+    my $in_queue = scalar @{ $self->{ 'fkeys_list' } };
+    if (   ( 0 == $workers )
+        && ( 0 == $in_queue ) )
+    {
+        print "\nData loading done.\n";
+        return;
+    }
+    printf "%d fkeys loading. %d more to load. (total %d fkeys to be created).   \r", $workers, $in_queue, $self->{ 'fkeys_count' };
+    return;
+}
+
+sub show_progress_for_ic_files {
+    my $self = shift;
+    unless ( defined $self->{ 'ic_count' } ) {
+        $self->{ 'ic_count' } = scalar @{ $self->{ 'ic_list' } };
+        return;
+    }
+    my $workers  = scalar keys %{ $self->{ 'kids' } };
+    my $in_queue = scalar @{ $self->{ 'ic_list' } };
+    if (   ( 0 == $workers )
+        && ( 0 == $in_queue ) )
+    {
+        print "\nData loading done.\n";
+        return;
+    }
+    printf "%d index/constraint files loading. %d more to load. (total %d files to be processed).   \r", $workers, $in_queue, $self->{ 'ic_count' };
+    return;
+}
+
+sub process_data_file {
+    my $self     = shift;
+    my $datafile = shift;
+
+    my @cat = ();
+    if ( $self->{ 'compressor' } ) {
+        push @cat, $self->{ 'compressor' }, '-dc';
+    }
+    else {
+        push @cat, 'cat';
+    }
+    push @cat, $datafile;
+
+    my @psql = ( $self->{ 'psql' }, '-qAtX' );
+
+    my $cat_cmd  = join ' ', map { quotemeta $_ } @cat;
+    my $psql_cmd = join ' ', map { quotemeta $_ } @psql;
+
+    my $full_cmd = join ' | ', $cat_cmd, $psql_cmd;
+
+    my $return = system $full_cmd;
+    exit 1 if $return;
+    return;
+}
+
+sub process_fkey {
+    my $self = shift;
+    my $fkey = shift;
+
+    my ( $list_fh, $list_filename ) = tempfile( 'list.XXXXXX', 'DIR' => $self->{ 'tmpdir' } );
+    print $list_fh $fkey->{ 'line' } . "\n";
+    close $list_fh;
+
+    my $output = $self->run_command(
+        $self->{ 'pg_restore' },
+        '-L',
+        $list_filename,
+        File::Spec->catfile( $self->{ 'input' }, 'schema.dump' ),
+    );
+    unlink $list_filename;
+
+    my ( $sql_fh, $sql_filename ) = tempfile( 'sql.XXXXXX', 'DIR' => $self->{ 'tmpdir' }, );
+    print $sql_fh "BEGIN;\n";
+    print $sql_fh "LOCK TABLE ONLY $_ IN SHARE ROW EXCLUSIVE MODE;\n" for @{ $fkey->{ 'tables' } };
+    print $sql_fh $output . "\n";
+    print $sql_fh "COMMIT;\n";
+    close $sql_fh;
+
+    $self->run_command(
+        $self->{ 'psql' },
+        '-qAtX',
+        '-f',
+        $sql_filename,
+    );
+    unlink $sql_filename;
+    return;
+}
+
+sub process_ic_file {
+    my $self    = shift;
+    my $ic_data = shift;
+
+    my ( $list_fh, $list_filename ) = tempfile( 'list.XXXXXX', 'DIR' => $self->{ 'tmpdir' }, );
+    print $list_fh $ic_data->{ 'line' } . "\n";
+    close $list_fh;
+
+    $self->run_command(
+        $self->{ 'pg_restore' },
+        '-L',
+        $list_filename,
+        '-d',
+        $self->{ 'database' },
+        File::Spec->catfile( $self->{ 'input' }, 'schema.dump' ),
+    );
+    unlink $list_filename;
+    return;
+}
+
+sub process_in_parallel {
+    my $self   = shift;
+    my %args   = @_;
+    my $f_next = $args{ 'next_data' };
+    my $f_show = $args{ 'show_progress' };
+    my $f_work = $args{ 'worker' };
+
+    # Initialize progress info
+    $f_show->();
+
+    $SIG{ 'CHLD' } = \&REAPER;
+
+    my $alert = 0;
+    my $kids  = {};
+    $self->{ 'kids' } = $kids;
+    while ( 1 ) {
+        my @pids = keys %killed_pids;
+        for my $killed ( @pids ) {
+            my $rc    = delete $killed_pids{ $killed };
+            my $label = delete $kids->{ $killed };
+            next unless $rc;
+            $alert = 1;
+            print "\nGot non-zero return from one of workers ($label). Abort.\n";
+        }
+        while ( $self->{ 'jobs' } > scalar keys %{ $kids } ) {
+            last if $alert;
+            my ( $label, $data ) = $f_next->();
+            last unless defined $data;
+
+            my $pid = fork();
+            croak "cannot fork" unless defined $pid;
+            if ( $pid == 0 ) {
+
+                # It's worker process.
+                delete $SIG{ 'CHLD' };
+                $f_work->( $data );
+                exit;
+            }
+
+            # It's master.
+            $kids->{ $pid } = $label;
+        }
+
+        $f_show->();
+        last if 0 == scalar keys %{ $kids };
+        sleep 60;    # sleep will get interrupted when child exits, and then the loop will repeat.
+    }
+    return;
+}
+
+sub find_data_files_to_load {
+    my $self = shift;
+    my $dir;
+
+    croak( 'Cannot opendir() on ' . $self->{ 'input' } . ": $OS_ERROR\n" ) unless opendir( $dir, $self->{ 'input' } );
+    my @names = readdir $dir;
+    closedir $dir;
+
+    my @data_files = ();
+    for my $filename ( @names ) {
+        my $file_path = File::Spec->catfile( $self->{ 'input' }, $filename );
+        next unless -f $file_path;
+        next unless $filename =~ m{\Adata\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+\.\d+\.dump\z};
+        my $file_size = ( stat( $file_path ) )[ 7 ];
+        push @data_files,
+            {
+            'file_path' => $file_path,
+            'file_size' => $file_size,
+            };
+    }
+
+    $self->{ 'files' } = [ map { $_->{ 'file_path' } } sort { $b->{ 'file_size' } <=> $a->{ 'file_size' } } @data_files ];
+    return;
+}
+
+sub load_base_schema {
+    my $self = shift;
+
+    my ( $list_fh, $list_filename ) = tempfile( 'list.XXXXXX', 'DIR' => $self->{ 'tmpdir' } );
+
+    for my $i ( @{ $self->{ 'list' } } ) {
+        next if $i->{ 'type' } eq 'INDEX';
+        next if $i->{ 'type' } eq 'FK';
+        next if $i->{ 'type' } eq 'CONSTRAINT';
+        next if $i->{ 'type' } eq 'TRIGGER';
+        next if $i->{ 'type' } eq 'ACL';
+        print $list_fh $i->{ 'line' } . "\n";
+    }
+    close $list_fh;
+    $self->run_command(
+        $self->{ 'pg_restore' },
+        '-L',
+        $list_filename,
+        '-d',
+        $self->{ 'database' },
+        File::Spec->catfile( $self->{ 'input' }, 'schema.dump' )
+    );
+    unlink $list_filename;
+    print "Base schema successfully loaded.\n";
+}
+
+sub finish_schema {
+    my $self = shift;
+
+    my ( $list_fh, $list_filename ) = tempfile( 'list.XXXXXX', 'DIR' => $self->{ 'tmpdir' } );
+
+    for my $i ( @{ $self->{ 'list' } } ) {
+        print $list_fh $i->{ 'line' } . "\n" if $i->{ 'type' } eq 'TRIGGER';
+        print $list_fh $i->{ 'line' } . "\n" if $i->{ 'type' } eq 'ACL';
+    }
+    close $list_fh;
+
+    $self->run_command(
+        $self->{ 'pg_restore' },
+        '-L',
+        $list_filename,
+        '-d',
+        $self->{ 'database' },
+        File::Spec->catfile( $self->{ 'input' }, 'schema.dump' )
+    );
+    unlink $list_filename;
+
+    print "Rest of schema successfully loaded.\n";
+}
+
+sub get_list_from_schema {
+    my $self = shift;
+    my $list = $self->run_command(
+        $self->{ 'pg_restore' },
+        '-l',
+        File::Spec->catfile( $self->{ 'input' }, 'schema.dump' )
+    );
+
+    my @input = split /\r?\n/, $list;
+
+    my @objects = ();
+
+    for my $line ( @input ) {
+        next unless $line =~ /^\d+;/;
+        croak "Strange line in pg_restore -l output: [$line]\n" unless $line =~ m{
+            \A
+            \d+
+            ;
+            \s+
+            \d+
+            \s+
+            \d+
+            \s+
+            ([A-Z]+)
+            \s+
+        }xms;
+        my $type = $1;
+        next if 'DATABASE' eq $type;
+        push @objects,
+            {
+            'type' => $type,
+            'line' => $line,
+            };
+    }
+
+    $self->{ 'list' } = \@objects;
+    return;
+}
+
+sub new {
+    my $class = shift;
+    my $self  = {};
+    bless $self, $class;
+    return $self;
+}
+
+sub run {
+    my $self = shift;
+
+    $self->read_options();
+    $self->show_running_details();
+    $self->confirm_work();
+    $self->load_dump();
+    return;
+}
+
+sub confirm_work {
+    my $self = shift;
+    printf "\n\nAre you sure you want to continue?\n";
+    printf "Enter YES to continue: ";
+    my $input = <STDIN>;
+    exit unless $input =~ m{\AYES\r?\n?\z};
+    return;
+}
+
+sub show_running_details {
+    my $self = shift;
+
+    my $db = $self->psql( 'SELECT current_user, current_database()' );
+
+    my $largest_tables = $self->psql(
+"SELECT * FROM ( SELECT rpad(oid::regclass::text, 32) || ' (' || pg_size_pretty(pg_relation_size(oid)) || ')' from pg_class where relkind = 'r' and relname !~ '^(information_schema|pg_.*)\$' order by pg_relation_size(oid) desc limit 5) x order by 1"
+    );
+
+    my @tables = map { $_->[ 0 ] } @{ $largest_tables };
+
+    printf "Config:\n";
+    for my $key ( sort keys %{ $self } ) {
+        printf "%-10s : %s\n", $key, $self->{ $key };
+    }
+
+    printf "\nDatabase details:\n";
+    printf "User          : %s\n", $db->[ 0 ]->[ 0 ];
+    printf "Database      : %s\n", $db->[ 0 ]->[ 1 ];
+    printf "Sample tables : %s\n", shift @tables;
+    printf "              - %s\n", $_ for @tables;
+    $self->{ 'database' } = $db->[ 0 ]->[ 1 ];
+    return;
+}
+
+sub read_options {
+    my $self = shift;
+
+    my $opts = {
+        'psql'       => 'psql',
+        'pg_restore' => 'pg_restore',
+        'input'      => '.',
+        'jobs'       => 1,
+        'fkey-jobs'  => 1,
+    };
+    my $is_ok = GetOptions( $opts, qw( help|? input|o=s compressor|c=s jobs|j=i fkey-jobs|f=i psql|p=s pg_restore|r=s ) );
+    pod2usage( '-verbose' => 1, ) unless $is_ok;
+    pod2usage( '-verbose' => 99, '-sections' => [ qw( DESCRIPTION SYNOPSIS OPTIONS ) ] ) if $opts->{ 'help' };
+
+    pod2usage( '-message' => 'Input directory has to be given.' ) if !$opts->{ 'input' };
+    pod2usage( '-message' => 'Input directory does not exist.' )  if !-e $opts->{ 'input' };
+    pod2usage( '-message' => 'Input is not directory.' )          if !-d $opts->{ 'input' };
+    pod2usage( '-message' => 'Input directory is not writable.' ) if !-w $opts->{ 'input' };
+
+    pod2usage( '-message' => 'Number of jobs has to be not-empty.' ) if '' eq $opts->{ 'jobs' };
+    $opts->{ 'jobs' } = int( $opts->{ 'jobs' } );
+    pod2usage( '-message' => 'Number of jobs cannot be less than 1.' )   if 1 > $opts->{ 'jobs' };
+    pod2usage( '-message' => 'Number of jobs cannot be more than 100.' ) if 100 < $opts->{ 'jobs' };
+
+    pod2usage( '-message' => 'Number of fkey-jobs has to be not-empty.' ) if '' eq $opts->{ 'fkey-jobs' };
+    $opts->{ 'fkey-jobs' } = int( $opts->{ 'fkey-jobs' } );
+    pod2usage( '-message' => 'Number of fkey-jobs cannot be less than 1.' )   if 1 > $opts->{ 'fkey-jobs' };
+    pod2usage( '-message' => 'Number of fkey-jobs cannot be more than 100.' ) if 100 < $opts->{ 'fkey-jobs' };
+
+    $opts->{ 'input' } = abs_path( $opts->{ 'input' } );
+    @{ $self }{ keys %{ $opts } } = values %{ $opts };
+    return;
+}
+
+sub psql {
+    my $self   = shift;
+    my $query  = shift;
+    my $output = $self->run_command( $self->{ 'psql' }, '-qAtX', '-F', "\t", '-c', $query, );
+    my @rows   = grep { '' ne $_ } split /\r?\n/, $output;
+    my @data   = map { [ split /\t/, $_ ] } @rows;
+    return \@data;
+}
+
+sub run_command {
+    my $self = shift;
+    my ( @cmd ) = @_;
+
+    my $real_command = join( ' ', map { quotemeta } @cmd );
+
+    my ( $stdout_fh, $stdout_filename ) = tempfile( 'fast.dump.XXXXXXXX', 'DIR' => $self->{ 'tmpdir' }, );
+    my ( $stderr_fh, $stderr_filename ) = tempfile( 'fast.dump.XXXXXXXX', 'DIR' => $self->{ 'tmpdir' }, );
+
+    $real_command .= sprintf ' 2>%s >%s', quotemeta $stderr_filename, quotemeta $stdout_filename;
+
+    system $real_command;
+    local $/ = undef;
+    my $stdout = <$stdout_fh>;
+    my $stderr = <$stderr_fh>;
+
+    close $stdout_fh;
+    close $stderr_fh;
+
+    unlink( $stdout_filename, $stderr_filename );
+
+    my $error_code;
+    if ( $CHILD_ERROR == -1 ) {
+        $error_code = $OS_ERROR;
+    }
+    elsif ( $CHILD_ERROR & 127 ) {
+        $error_code = sprintf "child died with signal %d, %s coredump\n", ( $CHILD_ERROR & 127 ), ( $CHILD_ERROR & 128 ) ? 'with' : 'without';
+    }
+    else {
+        $error_code = $CHILD_ERROR >> 8;
+    }
+
+    croak( "Couldn't run $real_command : " . $stderr ) if $error_code;
+
+    return $stdout;
+}
+
+=head1 NAME
+
+fast.restore - Program to do restore dumps of fast.dump. And do it FAST.
+
+=head1 SYNOPSIS
+
+fast.restore [--input=directory/] [--compressor=/usr/bin/gzip] [--jobs=n] [--fkey-jobs=n] [--psql=/usr/bin/psql] [--pg_restore=/usr/bin/pg_restore] [--help]
+
+=head1 OPTIONS
+
+=over
+
+=item --input - Directory where the dump files are. Defaults to current directory.
+
+=item --compressor - path to compressor that should be used to uncompress
+data. Default is empty, which doesn't decompress. This should be set to the
+same compression program that was used when doing fast.dump.
+
+=item --jobs - how many concurrent processes to run when restoring data to
+tables and creating indexes. Defaults to 1.
+
+=item --fkey-jobs - how many concurrent processes to run when creating foreign keys.
+Defaults to 1.
+
+=item --psql - path to psql program. Defaults to "psql", which will use
+$PATH environment variable to find it.
+
+=item --pg_restore - path to pg_restore program. Defaults to "pg_restore",
+which will use $PATH environment variable to find it.
+
+=item --help - shows information about usage of the program.
+
+=back
+
+All options can be given in abbreviated version, using single dash character
+and first letter of option, like:
+
+    fast.dump -i /tmp -c bzip2 -j 16
+
+Database connection details should be given using PG* environment variables.
+
+=head1 DESCRIPTION
+
+fast.restore is couterpart to fast.dump.
+
+It is used to load dumps made by fast.dump in parallel way so that the
+process time will be as short as possible.
+
+It cannot be used with normal (pg_dump made) dumps.
