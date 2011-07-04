@@ -133,54 +133,29 @@ sub make_single_blob {
     my $file_name = $self->get_file_name( $blob );
     $PROGRAM_NAME .= ' ... ' . $file_name;
 
-    my $sql_filename = $file_name . '.sql';
-    open my $sql_fh, '>', $sql_filename or croak( "Cannot write to $sql_filename: $OS_ERROR\n" );
+    my $sql;
+
+    if ( $self->{'compressor'} ) {
+        $sql = sprintf "\\o | %s -c - > %s\n", quotemeta( $self->{'compressor'} ), $file_name;
+    } else {
+        $sql = sprintf "\\o %s\n", $file_name;
+    }
+
+    $sql .= sprintf "SELECT 'COPY %s FROM STDIN;';\n", $blob->{ 'full_name' };
 
     if ( $blob->{ 'blob_type' } eq 'partial' ) {
-        print $sql_fh "set enable_seqscan = false;\n";
-        printf $sql_fh "SELECT 'COPY %s FROM STDIN;';\n", $blob->{ 'full_name' };
-        printf $sql_fh 'COPY (SELECT * FROM %s WHERE %s) TO stdout;%s', $blob->{ 'full_name' }, $blob->{ 'condition' }, "\n";
-        printf $sql_fh "SELECT E'\\\\.'\n";
-        $PROGRAM_NAME = 'Partial dump of ' . $blob->{ 'full_name' };
+        $sql .= "set enable_seqscan = false;\n";
+        $sql .= sprintf 'COPY (SELECT * FROM %s WHERE %s) TO stdout;%s', $blob->{ 'full_name' }, $blob->{ 'condition' }, "\n";
     }
     else {
-        printf $sql_fh "SELECT 'COPY %s FROM STDIN;';\n", $blob->{ 'full_name' };
-        printf $sql_fh 'COPY %s TO stdout;%s', $blob->{ 'full_name' }, "\n";
-        printf $sql_fh "SELECT E'\\\\.'\n";
-        $PROGRAM_NAME = 'Full dump of ' . $blob->{ 'full_name' };
+        $sql .= sprintf 'COPY %s TO stdout;%s', $blob->{ 'full_name' }, "\n";
     }
-    close $sql_fh;
+    $sql .= sprintf "SELECT E'\\\\.'\n";
 
-    my @cmd = ( $self->{ 'psql' }, '-qAtX', '-f', $sql_filename, );
+    $PROGRAM_NAME = $blob->{'blob_type'} . ' dump of ' . $blob->{ 'full_name' };
 
-    my $psql_call = join( ' ', map { quotemeta } @cmd );
-    if ( $self->{ 'compressor' } ) {
-        $psql_call .= ' | ' . quotemeta( $self->{ 'compressor' } ) . ' -c -';
-    }
+    $self->psql( $sql );
 
-    my ( $stderr_fh, $stderr_filename ) = tempfile( 'fast.dump.XXXXXXXX', 'TMPDIR' => 1, );
-
-    $psql_call .= sprintf ' 2>%s >%s', quotemeta $stderr_filename, quotemeta $file_name;
-
-    system $psql_call;
-    local $/ = undef;
-    my $stderr = <$stderr_fh>;
-
-    close $stderr_fh;
-    unlink( $stderr_filename );
-
-    my $error_code;
-    if ( $CHILD_ERROR == -1 ) {
-        $error_code = $OS_ERROR;
-    }
-    elsif ( $CHILD_ERROR & 127 ) {
-        $error_code = sprintf "child died with signal %d, %s coredump\n", ( $CHILD_ERROR & 127 ), ( $CHILD_ERROR & 128 ) ? 'with' : 'without';
-    }
-    else {
-        $error_code = $CHILD_ERROR >> 8;
-    }
-
-    croak( "\nCouldn't run $psql_call : " . $stderr ) if $error_code;
     return;
 }
 
@@ -250,64 +225,67 @@ sub split_tables_into_blobs {
                 i.indrelid, a.attnum;
         }
     );
-    croak( "pkey_columns is not arrayref? Something is wrong!" ) unless 'ARRAY' eq ref $pkey_columns;
-    croak( "pkey_columns is not arrayref of arrayrefs? Something is wrong!" ) unless 'ARRAY' eq ref $pkey_columns->[ 0 ];
 
-    my ( $sql_fh, $sql_filename ) = tempfile( 'fast.dump.XXXXXXXX', 'TMPDIR' => 1, );
+    my $sql_query_template = q{
+        SELECT
+            s2.starelid,
+            quote_literal(s2.vals[i]),
+            s2.probability[i]
+        FROM
+            (
+                SELECT
+                    s1.*,
+                    generate_series( array_lower( s1.vals, 1 ), array_upper( s1.vals, 1 ) ) as i
+                FROM
+                    (
+                        SELECT
+                            s.starelid,
+                            case
+                            when s.stakind1 = 2 THEN stavalues1
+                            when s.stakind2 = 2 THEN stavalues2
+                            when s.stakind3 = 2 THEN stavalues3
+                            when s.stakind4 = 2 THEN stavalues4
+                            when s.stakind1 = 1 THEN stavalues1
+                            when s.stakind2 = 1 THEN stavalues2
+                            when s.stakind3 = 1 THEN stavalues3
+                            when s.stakind4 = 1 THEN stavalues4
+                            ELSE NULL
+                            END::TEXT::%s[] as vals,
+                            case
+                            when 2 in (s.stakind1, s.stakind2, s.stakind3, s.stakind4) THEN NULL::real[]
+                            when s.stakind1 = 1 THEN stanumbers1
+                            when s.stakind2 = 1 THEN stanumbers2
+                            when s.stakind3 = 1 THEN stanumbers3
+                            when s.stakind4 = 1 THEN
+                            stanumbers4
+                            ELSE
+                            NULL::real[]
+                            END as probability
+                        FROM
+                            pg_statistic s
+                        WHERE
+                            s.starelid = %d
+                            AND staattnum = %d
+                            AND (
+                                2 in (s.stakind1, s.stakind2, s.stakind3, s.stakind4)
+                                OR
+                                1 in (s.stakind1, s.stakind2, s.stakind3, s.stakind4)
+                            )
+                    ) as s1
+            ) as s2
+        ORDER BY s2.starelid, s2.vals[i];%s};
+    # We don't have it in readable format for psql
+    $sql_query_template =~ s/\s+/ /g;
 
+    my $sql = '';
     for my $row ( @{ $pkey_columns } ) {
         $oids{ $row->[ 0 ] }->{ 'partition_key' }    = $row->[ 2 ];
         $oids{ $row->[ 0 ] }->{ 'partition_values' } = [];
-        my $sql_query = sprintf q{
-            SELECT
-                s2.starelid,
-                quote_literal(s2.vals[i]),
-                s2.probability[i]
-            FROM
-                (
-                    SELECT
-                        s1.*,
-                        generate_series( array_lower( s1.vals, 1 ), array_upper( s1.vals, 1 ) ) as i
-                    FROM
-                        (
-                            SELECT
-                                s.starelid,
-                                case
-                                when s.stakind1 = 2 THEN stavalues1
-                                when s.stakind2 = 2 THEN stavalues2
-                                when s.stakind3 = 2 THEN stavalues3
-                                when s.stakind4 = 2 THEN stavalues4
-                                when s.stakind1 = 1 THEN stavalues1
-                                when s.stakind2 = 1 THEN stavalues2
-                                when s.stakind3 = 1 THEN stavalues3
-                                when s.stakind4 = 1 THEN stavalues4
-                                ELSE NULL
-                                END::TEXT::%s[] as vals,
-                                case
-                                when 2 in (s.stakind1, s.stakind2, s.stakind3, s.stakind4) THEN NULL::real[]
-                                when s.stakind1 = 1 THEN stanumbers1
-                                when s.stakind2 = 1 THEN stanumbers2
-                                when s.stakind3 = 1 THEN stanumbers3
-                                when s.stakind4 = 1 THEN
-                                stanumbers4
-                                ELSE
-                                NULL::real[]
-                                END as probability
-                            FROM
-                                pg_statistic s
-                            WHERE
-                                s.starelid = %d
-                                AND staattnum = %d
-                                AND ( 2 in (s.stakind1, s.stakind2, s.stakind3, s.stakind4) OR 1 in (s.stakind1, s.stakind2, s.stakind3, s.stakind4) )
-                        ) as s1
-                ) as s2
-            ORDER BY s2.starelid, s2.vals[i];%s}, @{ $row }[ 3, 0, 1 ], "\n";
-        print $sql_fh $sql_query;
+        my $sql_query = sprintf $sql_query_template, @{ $row }[ 3, 0, 1 ], "\n";
+        $sql .= $sql_query;
     }
-    close $sql_fh;
 
-    my $partitions = $self->psql( '\i ' . $sql_filename );
-    unlink $sql_filename;
+    my $partitions = $self->psql( $sql, 'get.stats.sql' );
 
     for my $row ( @{ $partitions } ) {
         push @{ $oids{ $row->[ 0 ] }->{ 'partition_values' } },
@@ -426,21 +404,40 @@ sub dump_schema {
     my $self = shift;
     $self->run_command( qw( pg_dump -Fc -f schema.dump -s -v ) );
 
-    my ( $sql_fh, $sql_filename ) = tempfile( 'fast.dump.XXXXXXXX', 'TMPDIR' => 1, );
-    print $sql_fh "\\o index.sizes\n";
-    print $sql_fh
-        "select n.nspname, c.relname, pg_relation_size(c.oid) from pg_class c join pg_namespace n on c.relnamespace = n.oid where c.relkind = 'i' and n.nspname !~ '^pg_' order by 3 desc;\n";
-    close $sql_fh;
-    $self->run_command( $self->{ 'psql' }, '-qAtX', '-F', "\t", '-f', $sql_filename );
+    $self->psql(
+        q{
+            \o index.sizes
+            select
+                n.nspname,
+                c.relname,
+                pg_relation_size(c.oid)
+            from
+                pg_class c
+                join pg_namespace n on c.relnamespace = n.oid
+            where
+                c.relkind = 'i'
+                and n.nspname !~ '^pg_'
+            order by
+                3 desc;
+        }
+    );
 
-    open $sql_fh, '>', $sql_filename or croak( "Cannot re-write to $sql_filename: $OS_ERROR\n" );
-    print $sql_fh "\\o fkeys.ordering\n";
-    print $sql_fh
-"SELECT n.nspname, c.conname, c.conrelid::regclass, c.confrelid::regclass, pg_relation_size( c.conrelid ) + pg_relation_size( c.confrelid ) as tables_size FROM pg_constraint c JOIN pg_namespace n on c.connamespace = n.oid WHERE c.contype = 'f';\n";
-    close $sql_fh;
-
-    $self->run_command( $self->{ 'psql' }, '-qAtX', '-F', "\t", '-f', $sql_filename );
-    unlink $sql_filename;
+    $self->psql(
+        q{
+            \o fkeys.ordering
+            SELECT
+                n.nspname,
+                c.conname,
+                c.conrelid::regclass,
+                c.confrelid::regclass,
+                pg_relation_size( c.conrelid ) + pg_relation_size( c.confrelid )
+            FROM
+                pg_constraint c
+                JOIN pg_namespace n on c.connamespace = n.oid
+            WHERE
+                c.contype = 'f';
+        }
+    );
 
     return;
 }
@@ -461,7 +458,25 @@ sub show_running_details {
     my $db = $self->psql( 'SELECT current_user, current_database()' );
 
     my $largest_tables = $self->psql(
-"SELECT * FROM ( SELECT rpad(oid::regclass::text, 32) || ' (' || pg_size_pretty(pg_relation_size(oid)) || ')' from pg_class where relkind = 'r' and relname !~ '^pg_' order by pg_relation_size(oid) desc limit 5) x order by 1"
+        q{
+            SELECT
+                *
+            FROM
+                (
+                    SELECT
+                        rpad(oid::regclass::text, 32) || ' (' || pg_size_pretty(pg_relation_size(oid)) || ')'
+                    FROM
+                        pg_class
+                    WHERE
+                        relkind = 'r'
+                        and relname !~ '^pg_'
+                    order by
+                        pg_relation_size(oid) desc
+                    limit 5
+                ) x
+            order by
+                1
+        }
     );
 
     my @tables = map { $_->[ 0 ] } @{ $largest_tables };
@@ -519,11 +534,29 @@ sub read_options {
 }
 
 sub psql {
-    my $self   = shift;
-    my $query  = shift;
-    my $output = $self->run_command( qw( psql -qAtX -F ), "\t", '-c', $query );
-    my @rows   = grep { '' ne $_ } split /\r?\n/, $output;
-    my @data   = map { [ split /\t/, $_ ] } @rows;
+    my $self       = shift;
+    my $query      = shift;
+    my $query_file = shift;
+
+    my $remove_query_file = 1;
+
+    my $query_fh;
+    if ( defined $query_file ) {
+        $remove_query_file = 0;
+        open $query_fh, '>', $query_file or croak( "Cannot write to $query_file: $OS_ERROR\n" );
+    }
+    else {
+        ( $query_fh, $query_file ) = tempfile( 'fast.dump.XXXXXXXX', 'TMPDIR' => 1, );
+    }
+
+    print $query_fh $query;
+    close $query_fh;
+    my $output = $self->run_command( qw( psql -qAtX -F ), "\t", '-f', $query_file );
+    unlink $query_file if $remove_query_file;
+
+    my @rows = grep { '' ne $_ } split /\r?\n/, $output;
+    my @data = map { [ split /\t/, $_ ] } @rows;
+
     return \@data;
 }
 
