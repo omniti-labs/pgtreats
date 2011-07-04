@@ -408,6 +408,7 @@ sub load_base_schema {
         File::Spec->catfile( $self->{ 'input' }, 'schema.dump' )
     );
     unlink $list_filename;
+    $self->psql( "\\i " . File::Spec->catfile( $self->{ 'input' }, 'sequences.sql' ) );
     print "Base schema successfully loaded.\n";
 }
 
