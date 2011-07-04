@@ -13,6 +13,7 @@ use Carp qw( croak carp );
 use English qw( -no_match_vars );
 use Getopt::Long qw( :config no_ignore_case );
 use Data::Dumper;
+use File::Basename;
 use Cwd qw( abs_path );
 use Pod::Usage;
 use POSIX qw( :sys_wait_h );
@@ -68,7 +69,7 @@ sub launch_dumpers {
         $c{ $t->{ 'blob_type' } }++;
     }
 
-    open my $fh, ">", File::Spec->catfile( $self->{ 'output' }, 'index.lst' ) or croak( "Cannot create index file: $OS_ERROR\n" );
+    open my $fh, ">", 'index.lst' or croak( "Cannot create index file: $OS_ERROR\n" );
     printf $fh '%-5s | %-7s | %-32s | %-32s | %-10s | %s%s', '#', qw( type schema table size condition ), "\n";
     for my $i ( @{ $self->{ 'blobs' } } ) {
         printf $fh '%5d | %-7s | %-32s | %-32s | %-10s | %s%s', @{ $i }{ qw( id blob_type schema table size ) }, ( $i->{ 'condition' } || '' ), "\n";
@@ -132,8 +133,7 @@ sub make_single_blob {
     my $file_name = $self->get_file_name( $blob );
     $PROGRAM_NAME .= ' ... ' . $file_name;
 
-    my $output_path = File::Spec->catfile( $self->{ 'output' }, $file_name );
-    my $sql_filename = $output_path . '.sql';
+    my $sql_filename = $file_name . '.sql';
     open my $sql_fh, '>', $sql_filename or croak( "Cannot write to $sql_filename: $OS_ERROR\n" );
 
     if ( $blob->{ 'blob_type' } eq 'partial' ) {
@@ -160,7 +160,7 @@ sub make_single_blob {
 
     my ( $stderr_fh, $stderr_filename ) = tempfile( 'fast.dump.XXXXXXXX', 'TMPDIR' => 1, );
 
-    $psql_call .= sprintf ' 2>%s >%s', quotemeta $stderr_filename, quotemeta $output_path;
+    $psql_call .= sprintf ' 2>%s >%s', quotemeta $stderr_filename, quotemeta $file_name;
 
     system $psql_call;
     local $/ = undef;
@@ -351,7 +351,7 @@ sub split_tables_into_blobs {
 sub get_list_of_tables {
     my $self = shift;
 
-    my $restored = $self->run_command( $self->{ 'pg_restore' }, '-l', File::Spec->catfile( $self->{ 'output' }, 'schema.dump' ) );
+    my $restored = $self->run_command( qw( pg_restore -l schema.dump ) );
 
     my @lines = split /\r?\n/, $restored;
     my %tables = ();
@@ -408,17 +408,17 @@ sub get_list_of_tables {
 
 sub dump_schema {
     my $self = shift;
-    $self->run_command( $self->{ 'pg_dump' }, '-Fc', '-f', File::Spec->catfile( $self->{ 'output' }, 'schema.dump' ), '-s', '-v' );
+    $self->run_command( qw( pg_dump -Fc -f schema.dump -s -v ) );
 
     my ( $sql_fh, $sql_filename ) = tempfile( 'fast.dump.XXXXXXXX', 'TMPDIR' => 1, );
-    print $sql_fh "\\o " . File::Spec->catfile( $self->{ 'output' }, 'index.sizes' ) . "\n";
+    print $sql_fh "\\o index.sizes\n";
     print $sql_fh
         "select n.nspname, c.relname, pg_relation_size(c.oid) from pg_class c join pg_namespace n on c.relnamespace = n.oid where c.relkind = 'i' and n.nspname !~ '^pg_' order by 3 desc;\n";
     close $sql_fh;
     $self->run_command( $self->{ 'psql' }, '-qAtX', '-F', "\t", '-f', $sql_filename );
 
     open $sql_fh, '>', $sql_filename or croak( "Cannot re-write to $sql_filename: $OS_ERROR\n" );
-    print $sql_fh "\\o " . File::Spec->catfile( $self->{ 'output' }, 'fkeys.ordering' ) . "\n";
+    print $sql_fh "\\o fkeys.ordering\n";
     print $sql_fh
 "SELECT n.nspname, c.conname, c.conrelid::regclass, c.confrelid::regclass, pg_relation_size( c.conrelid ) + pg_relation_size( c.confrelid ) as tables_size FROM pg_constraint c JOIN pg_namespace n on c.connamespace = n.oid WHERE c.contype = 'f';\n";
     close $sql_fh;
@@ -432,7 +432,7 @@ sub dump_schema {
 sub confirm_work {
     my $self = shift;
     printf "\n\nAre you sure you want to continue?\n";
-    printf "Please remember that any other ( aside from $PROGRAM_NAME ) connections to database can cause dump corruption!\n";
+    printf "Please remember that any other ( aside from %s ) connections to database can cause dump corruption!\n", basename( $PROGRAM_NAME );
     printf "Enter YES to continue: ";
     my $input = <STDIN>;
     exit unless $input =~ m{\AYES\r?\n?\z};
@@ -493,14 +493,19 @@ sub read_options {
     pod2usage( '-message' => 'Max-size cannot be less than 1.' ) if 1 > $opts->{ 'max-size' };
 
     $opts->{ 'output' } = abs_path( $opts->{ 'output' } );
+
     @{ $self }{ keys %{ $opts } } = values %{ $opts };
+
+    # Thanks to this we will just create files in ".", so creation of output filenames will be easier.
+    chdir $self->{ 'output' };
+
     return;
 }
 
 sub psql {
     my $self   = shift;
     my $query  = shift;
-    my $output = $self->run_command( $self->{ 'psql' }, '-qAtX', '-F', "\t", '-c', $query, );
+    my $output = $self->run_command( qw( psql -qAtX -F ), "\t", '-c', $query );
     my @rows   = grep { '' ne $_ } split /\r?\n/, $output;
     my @data   = map { [ split /\t/, $_ ] } @rows;
     return \@data;
@@ -509,6 +514,9 @@ sub psql {
 sub run_command {
     my $self = shift;
     my ( @cmd ) = @_;
+
+    # Use paths provided by user as command line options
+    $cmd[ 0 ] = $self->{ $cmd[ 0 ] } if $self->{ $cmd[ 0 ] };
 
     my $real_command = join( ' ', map { quotemeta } @cmd );
 
