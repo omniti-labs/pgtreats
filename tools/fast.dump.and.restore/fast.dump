@@ -232,7 +232,23 @@ sub split_tables_into_blobs {
     my $oids = join( ',', map { $_->{ 'oid' } } @to_split );
 
     my $pkey_columns = $self->psql(
-"select distinct on (i.indrelid) i.indrelid, a.attnum, a.attname, t.typname from pg_index i join pg_attribute a on i.indexrelid = a.attrelid join pg_type t on a.atttypid = t.oid where indrelid = ANY('{$oids}'::oid[]) and indisprimary order by i.indrelid, a.attnum"
+        qq{
+            select
+                distinct on (i.indrelid) i.indrelid,
+                ta.attnum,
+                a.attname,
+                t.typname
+            from
+                pg_index i
+                join pg_attribute a on i.indexrelid = a.attrelid
+                join pg_attribute ta on ta.attrelid = i.indrelid AND ta.attname = a.attname
+                join pg_type t on a.atttypid = t.oid
+            where
+                i.indrelid = ANY('{$oids}'::oid[])
+                and i.indisprimary
+            order by
+                i.indrelid, a.attnum;
+        }
     );
     croak( "pkey_columns is not arrayref? Something is wrong!" ) unless 'ARRAY' eq ref $pkey_columns;
     croak( "pkey_columns is not arrayref of arrayrefs? Something is wrong!" ) unless 'ARRAY' eq ref $pkey_columns->[ 0 ];
