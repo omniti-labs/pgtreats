@@ -439,6 +439,17 @@ sub dump_schema {
         }
     );
 
+    my $sequences = $self->psql( "select oid::regclass from pg_class where relkind = 'S'" );
+    my @sequence_names = map { $_->[0] } @{ $sequences };
+
+    my $sql = join "\n", map {
+        sprintf "SELECT 'SELECT setval( ''%s'', ' || last_value || ', ' || case when is_called then 'true' else 'false' end || ');' FROM %s;\n",
+        $_,
+        $_
+        }  @sequence_names;
+
+    $self->psql( "\\o sequences.sql\n$sql\n" );
+
     return;
 }
 
