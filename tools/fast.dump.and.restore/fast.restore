@@ -16,8 +16,9 @@ use Data::Dumper;
 use Cwd qw( abs_path );
 use Pod::Usage;
 use POSIX qw( :sys_wait_h );
-use File::Spec;
 use File::Temp qw( tempfile tempdir );
+use POSIX qw( strftime );
+use Time::HiRes qw( time );
 
 our %killed_pids = ();
 
@@ -37,15 +38,58 @@ sub load_dump {
         'TMPDIR'  => 1,
         'CLEANUP' => 1,
     );
+    $self->log( 'Starting get_list_from_schema' );
     $self->get_list_from_schema();
+    $self->log( 'get_list_from_schema finished.' );
+
+    $self->log( 'Starting load_base_schema' );
     $self->load_base_schema();
+    $self->log( 'load_base_schema finished.' );
+
+    $self->log( 'Starting load_data' );
     $self->load_data();
+    $self->log( 'load_data finished.' );
+
+    $self->log( 'Starting get_tables_size' );
     $self->get_tables_size();
+    $self->log( 'get_tables_size finished.' );
+
+    $self->log( 'Starting get_indexes_size' );
     $self->get_indexes_size();
+    $self->log( 'get_indexes_size finished.' );
+
+    $self->log( 'Starting get_fkeys_size' );
     $self->get_fkeys_size();
+    $self->log( 'get_fkeys_size finished.' );
+
+    $self->log( 'Starting create_constraints_and_indexes' );
     $self->create_constraints_and_indexes();
+    $self->log( 'create_constraints_and_indexes finished.' );
+
+    $self->log( 'Starting create_foreign_keys' );
     $self->create_foreign_keys();
+    $self->log( 'create_foreign_keys finished.' );
+
+    $self->log( 'Starting finish_schema' );
     $self->finish_schema();
+    $self->log( 'finish_schema finished.' );
+
+    return;
+}
+
+sub log {
+    my $self = shift;
+    my ( $format, @args ) = @_;
+    $format =~ s/\s*\z//;
+
+    my $time         = time();
+    my $date_time    = strftime( '%Y-%m-%d %H:%M:%S', localtime $time );
+    my $miliseconds = ( $time * 1000 ) % 1000;
+
+    my $time_stamp = sprintf "%s.%03u", $date_time, $miliseconds;
+    my $msg = sprintf $format, @args;
+
+    printf "%s : %s\n", $time_stamp, $msg;
     return;
 }
 
@@ -60,7 +104,7 @@ sub get_tables_size {
 
 sub get_indexes_size {
     my $self = shift;
-    open my $fh, '<', File::Spec->catfile( $self->{ 'input' }, 'index.sizes' ) or croak( "Cannot open index.sizes in dump: $OS_ERROR\n" );
+    open my $fh, '<', 'index.sizes' or croak( "Cannot open index.sizes in dump: $OS_ERROR\n" );
     while ( my $l = <$fh> ) {
         $l =~ s/\s*\z//;
         my @c = split /\t/, $l;
@@ -72,7 +116,7 @@ sub get_indexes_size {
 
 sub get_fkeys_size {
     my $self = shift;
-    open my $fh, '<', File::Spec->catfile( $self->{ 'input' }, 'fkeys.ordering' ) or croak( "Cannot open fkeys.ordering in dump: $OS_ERROR\n" );
+    open my $fh, '<', 'fkeys.ordering' or croak( "Cannot open fkeys.ordering in dump: $OS_ERROR\n" );
     while ( my $l = <$fh> ) {
         $l =~ s/\s*\z//;
         my @c = split /\t/, $l;
@@ -131,7 +175,7 @@ sub create_constraints_and_indexes {
     $self->process_in_parallel(
         'next_data' => sub { my $x = shift @{ $self->{ 'ic_list' } }; return unless defined $x; return ( $x->{ 'name' }, $x ) },
         'show_progress' => sub { return $self->show_progress_for_ic_files(); },
-        'worker'        => sub { return $self->process_ic_file( @_ ) },
+        'worker'        => sub { return $self->pg_restore( \@_, 1 ) },
     );
     return;
 }
@@ -189,7 +233,7 @@ sub show_progress_for_data_files {
     if (   ( 0 == $workers )
         && ( 0 == $in_queue ) )
     {
-        print "\nData loading done.\n";
+        print "\n";
         return;
     }
     printf "%d data files loading. %d more to load. (total %d files to be processed).   \r", $workers, $in_queue, $self->{ 'files_count' };
@@ -207,7 +251,7 @@ sub show_progress_for_fkeys {
     if (   ( 0 == $workers )
         && ( 0 == $in_queue ) )
     {
-        print "\nData loading done.\n";
+        print "\n";
         return;
     }
     printf "%d fkeys loading. %d more to load. (total %d fkeys to be created).   \r", $workers, $in_queue, $self->{ 'fkeys_count' };
@@ -225,7 +269,7 @@ sub show_progress_for_ic_files {
     if (   ( 0 == $workers )
         && ( 0 == $in_queue ) )
     {
-        print "\nData loading done.\n";
+        print "\n";
         return;
     }
     printf "%d index/constraint files loading. %d more to load. (total %d files to be processed).   \r", $workers, $in_queue, $self->{ 'ic_count' };
@@ -261,52 +305,16 @@ sub process_fkey {
     my $self = shift;
     my $fkey = shift;
 
-    my ( $list_fh, $list_filename ) = tempfile( 'list.XXXXXX', 'DIR' => $self->{ 'tmpdir' } );
-    print $list_fh $fkey->{ 'line' } . "\n";
-    close $list_fh;
+    my $output = $self->pg_restore( [ $fkey ], 0 );
 
-    my $output = $self->run_command(
-        $self->{ 'pg_restore' },
-        '-L',
-        $list_filename,
-        File::Spec->catfile( $self->{ 'input' }, 'schema.dump' ),
-    );
-    unlink $list_filename;
+    my @sql_lines = ();
+    push @sql_lines, "BEGIN;";
+    push @sql_lines, "LOCK TABLE ONLY $_ IN SHARE ROW EXCLUSIVE MODE;" for @{ $fkey->{ 'tables' } };
+    push @sql_lines, $output . "";
+    push @sql_lines, "COMMIT;";
 
-    my ( $sql_fh, $sql_filename ) = tempfile( 'sql.XXXXXX', 'DIR' => $self->{ 'tmpdir' }, );
-    print $sql_fh "BEGIN;\n";
-    print $sql_fh "LOCK TABLE ONLY $_ IN SHARE ROW EXCLUSIVE MODE;\n" for @{ $fkey->{ 'tables' } };
-    print $sql_fh $output . "\n";
-    print $sql_fh "COMMIT;\n";
-    close $sql_fh;
+    $self->psql( join("\n", @sql_lines ) );
 
-    $self->run_command(
-        $self->{ 'psql' },
-        '-qAtX',
-        '-f',
-        $sql_filename,
-    );
-    unlink $sql_filename;
-    return;
-}
-
-sub process_ic_file {
-    my $self    = shift;
-    my $ic_data = shift;
-
-    my ( $list_fh, $list_filename ) = tempfile( 'list.XXXXXX', 'DIR' => $self->{ 'tmpdir' }, );
-    print $list_fh $ic_data->{ 'line' } . "\n";
-    close $list_fh;
-
-    $self->run_command(
-        $self->{ 'pg_restore' },
-        '-L',
-        $list_filename,
-        '-d',
-        $self->{ 'database' },
-        File::Spec->catfile( $self->{ 'input' }, 'schema.dump' ),
-    );
-    unlink $list_filename;
     return;
 }
 
@@ -364,19 +372,18 @@ sub find_data_files_to_load {
     my $self = shift;
     my $dir;
 
-    croak( 'Cannot opendir() on ' . $self->{ 'input' } . ": $OS_ERROR\n" ) unless opendir( $dir, $self->{ 'input' } );
+    croak( 'Cannot opendir() on ' . $self->{ 'input' } . ": $OS_ERROR\n" ) unless opendir( $dir, '.' );
     my @names = readdir $dir;
     closedir $dir;
 
     my @data_files = ();
-    for my $filename ( @names ) {
-        my $file_path = File::Spec->catfile( $self->{ 'input' }, $filename );
-        next unless -f $file_path;
-        next unless $filename =~ m{\Adata\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+\.\d+\.dump\z};
-        my $file_size = ( stat( $file_path ) )[ 7 ];
+    for my $file_name ( @names ) {
+        next unless -f $file_name;
+        next unless $file_name =~ m{\Adata\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+\.\d+\.dump\z};
+        my $file_size = ( stat( $file_name ) )[ 7 ];
         push @data_files,
             {
-            'file_path' => $file_path,
+            'file_path' => $file_name,
             'file_size' => $file_size,
             };
     }
@@ -388,7 +395,7 @@ sub find_data_files_to_load {
 sub load_base_schema {
     my $self = shift;
 
-    my ( $list_fh, $list_filename ) = tempfile( 'list.XXXXXX', 'DIR' => $self->{ 'tmpdir' } );
+    my @items = ();
 
     for my $i ( @{ $self->{ 'list' } } ) {
         next if $i->{ 'type' } eq 'INDEX';
@@ -396,52 +403,33 @@ sub load_base_schema {
         next if $i->{ 'type' } eq 'CONSTRAINT';
         next if $i->{ 'type' } eq 'TRIGGER';
         next if $i->{ 'type' } eq 'ACL';
-        print $list_fh $i->{ 'line' } . "\n";
+        push @items, $i;
     }
-    close $list_fh;
-    $self->run_command(
-        $self->{ 'pg_restore' },
-        '-L',
-        $list_filename,
-        '-d',
-        $self->{ 'database' },
-        File::Spec->catfile( $self->{ 'input' }, 'schema.dump' )
-    );
-    unlink $list_filename;
-    $self->psql( "\\i " . File::Spec->catfile( $self->{ 'input' }, 'sequences.sql' ) );
-    print "Base schema successfully loaded.\n";
+
+    $self->pg_restore( \@items, 1 );
+
+    $self->psql( "\\i sequences.sql" );
+
+    return;
 }
 
 sub finish_schema {
     my $self = shift;
 
-    my ( $list_fh, $list_filename ) = tempfile( 'list.XXXXXX', 'DIR' => $self->{ 'tmpdir' } );
-
-    for my $i ( @{ $self->{ 'list' } } ) {
-        print $list_fh $i->{ 'line' } . "\n" if $i->{ 'type' } eq 'TRIGGER';
-        print $list_fh $i->{ 'line' } . "\n" if $i->{ 'type' } eq 'ACL';
-    }
-    close $list_fh;
-
-    $self->run_command(
-        $self->{ 'pg_restore' },
-        '-L',
-        $list_filename,
-        '-d',
-        $self->{ 'database' },
-        File::Spec->catfile( $self->{ 'input' }, 'schema.dump' )
+    $self->pg_restore(
+        [ grep { $_->{'type'} =~ m{\A (?: TRIGGER | ACL ) \z }xms } @{ $self->{'list'} } ],
+        1
     );
-    unlink $list_filename;
 
-    print "Rest of schema successfully loaded.\n";
+    return;
 }
 
 sub get_list_from_schema {
     my $self = shift;
     my $list = $self->run_command(
-        $self->{ 'pg_restore' },
+        'pg_restore',
         '-l',
-        File::Spec->catfile( $self->{ 'input' }, 'schema.dump' )
+        'schema.dump'
     );
 
     my @input = split /\r?\n/, $list;
@@ -505,9 +493,28 @@ sub show_running_details {
     my $self = shift;
 
     my $db = $self->psql( 'SELECT current_user, current_database()' );
+    $self->{ 'database' } = $db->[ 0 ]->[ 1 ];
 
     my $largest_tables = $self->psql(
-"SELECT * FROM ( SELECT rpad(oid::regclass::text, 32) || ' (' || pg_size_pretty(pg_relation_size(oid)) || ')' from pg_class where relkind = 'r' and relname !~ '^(information_schema|pg_.*)\$' order by pg_relation_size(oid) desc limit 5) x order by 1"
+        q{
+            SELECT
+                *
+            FROM
+                (
+                    SELECT
+                        rpad(oid::regclass::text, 32) || ' (' || pg_size_pretty(pg_relation_size(oid)) || ')'
+                    FROM
+                        pg_class
+                    WHERE
+                        relkind = 'r'
+                        and relname !~ '^pg_'
+                    order by
+                        pg_relation_size(oid) desc
+                    limit 5
+                ) x
+            order by
+                1
+        }
     );
 
     my @tables = map { $_->[ 0 ] } @{ $largest_tables };
@@ -522,7 +529,6 @@ sub show_running_details {
     printf "Database      : %s\n", $db->[ 0 ]->[ 1 ];
     printf "Sample tables : %s\n", shift @tables;
     printf "              - %s\n", $_ for @tables;
-    $self->{ 'database' } = $db->[ 0 ]->[ 1 ];
     return;
 }
 
@@ -536,6 +542,7 @@ sub read_options {
         'jobs'       => 1,
         'fkey-jobs'  => 1,
     };
+
     my $is_ok = GetOptions( $opts, qw( help|? input|o=s compressor|c=s jobs|j=i fkey-jobs|f=i psql|p=s pg_restore|r=s ) );
     pod2usage( '-verbose' => 1, ) unless $is_ok;
     pod2usage( '-verbose' => 99, '-sections' => [ qw( DESCRIPTION SYNOPSIS OPTIONS ) ] ) if $opts->{ 'help' };
@@ -557,21 +564,62 @@ sub read_options {
 
     $opts->{ 'input' } = abs_path( $opts->{ 'input' } );
     @{ $self }{ keys %{ $opts } } = values %{ $opts };
+    chdir $self->{ 'input' };
     return;
 }
 
+sub pg_restore {
+    my $self = shift;
+    my ( $lines, $to_db ) = @_;
+
+    my ( $list_fh, $list_filename ) = tempfile( 'list.XXXXXX', 'DIR' => $self->{ 'tmpdir' }, );
+    print $list_fh $_->{ 'line' } . "\n" for @{ $lines };
+    close $list_fh;
+
+    my @cmd = ( 'pg_restore', '-L', $list_filename );
+    push @cmd, ( '-d', $self->{'database'} ) if $to_db;
+    push @cmd, 'schema.dump';
+
+    my $response = $self->run_command( @cmd );
+
+    unlink $list_filename;
+
+    return $response;
+}
+
 sub psql {
-    my $self   = shift;
-    my $query  = shift;
-    my $output = $self->run_command( $self->{ 'psql' }, '-qAtX', '-F', "\t", '-c', $query, );
-    my @rows   = grep { '' ne $_ } split /\r?\n/, $output;
-    my @data   = map { [ split /\t/, $_ ] } @rows;
+    my $self       = shift;
+    my $query      = shift;
+    my $query_file = shift;
+
+    my $remove_query_file = 1;
+
+    my $query_fh;
+    if ( defined $query_file ) {
+        $remove_query_file = 0;
+        open $query_fh, '>', $query_file or croak( "Cannot write to $query_file: $OS_ERROR\n" );
+    }
+    else {
+        ( $query_fh, $query_file ) = tempfile( 'fast.dump.XXXXXXXX', 'TMPDIR' => 1, );
+    }
+
+    print $query_fh $query;
+    close $query_fh;
+    my $output = $self->run_command( qw( psql -qAtX -F ), "\t", '-f', $query_file );
+    unlink $query_file if $remove_query_file;
+
+    my @rows = grep { '' ne $_ } split /\r?\n/, $output;
+    my @data = map { [ split /\t/, $_ ] } @rows;
+
     return \@data;
 }
 
 sub run_command {
     my $self = shift;
     my ( @cmd ) = @_;
+
+    # Use paths provided by user as command line options
+    $cmd[ 0 ] = $self->{ $cmd[ 0 ] } if $self->{ $cmd[ 0 ] };
 
     my $real_command = join( ' ', map { quotemeta } @cmd );
 
