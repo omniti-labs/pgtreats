@@ -1,0 +1,474 @@
+#!/usr/bin/env perl
+package main;
+use strict;
+use warnings;
+my $program = Omni::Program::Pg::CheckZeroPages->new();
+$program->run();
+exit;
+
+package Omni::Program::Pg::CheckZeroPages;
+use strict;
+use warnings;
+use Carp qw( croak carp );
+use English qw( -no_match_vars );
+use Getopt::Long qw( :config no_ignore_case );
+use Data::Dumper;
+use File::Spec;
+use Pod::Usage;
+use POSIX qw( :sys_wait_h );
+use File::Temp qw( tempfile tempdir );
+use POSIX qw( strftime floor );
+use Time::HiRes qw( time );
+
+our %killed_pids = ();
+
+sub REAPER {
+    my $child;
+    while ( ( $child = waitpid( -1, WNOHANG ) ) > 0 ) {
+        $killed_pids{ $child } = $CHILD_ERROR;
+    }
+    $SIG{ 'CHLD' } = \&REAPER;
+    return;
+}
+
+sub log {
+    my $self = shift;
+    my ( $format, @args ) = @_;
+    $format =~ s/\s*\z//;
+
+    my $time        = time();
+    my $date_time   = strftime( '%Y-%m-%d %H:%M:%S', localtime $time );
+    my $miliseconds = ( $time * 1000 ) % 1000;
+
+    my $time_stamp = sprintf "%s.%03u", $date_time, $miliseconds;
+    my $msg = sprintf $format, @args;
+
+    printf "%s : %s\n", $time_stamp, $msg;
+    return;
+}
+
+sub scan_in_parallel {
+    my $self = shift;
+
+    $SIG{ 'CHLD' } = \&REAPER;
+    $OUTPUT_AUTOFLUSH = 1;
+
+    my $total_files = scalar @{ $self->{ 'files' } };
+
+    my $alert   = 0;
+    my $kids    = {};
+    my $started = 0;
+    while ( 1 ) {
+        my @pids = keys %killed_pids;
+        for my $killed ( @pids ) {
+            my $rc  = delete $killed_pids{ $killed };
+            my $kid = delete $kids->{ $killed };
+            next unless $rc;
+            $alert = 1;
+            print "\nAborting. Got non-zero return from one of workers: " . Dumper( $kid ) . "\n";
+        }
+        while ( $self->{ 'jobs' } > scalar keys %{ $kids } ) {
+            last if $alert;
+            my $next = shift @{ $self->{ 'files' } };
+            $started++;
+            last unless defined $next;
+
+            my $pid = fork();
+            croak "cannot fork" unless defined $pid;
+            if ( $pid == 0 ) {
+
+                # It's worker process.
+                delete $SIG{ 'CHLD' };
+                $PROGRAM_NAME = sprintf 'File %d of %d : %s ( %s : %s )', $started, $total_files, $next->{ 'filename' }, $next->{ 'what' }, $next->{ 'name' };
+                $self->scan_file( $next );
+                exit;
+            }
+
+            # It's master.
+            $kids->{ $pid } = $next;
+        }
+
+        printf "Working on %d files. %d more in queue.\r", scalar keys %{ $kids }, scalar @{ $self->{ 'files' } };
+        last if 0 == scalar keys %{ $kids };
+        sleep 60;    # sleep will get interrupted when child exits, and then the loop will repeat.
+    }
+    print "\n";
+    return;
+}
+
+sub scan_file {
+    my $self       = shift;
+    my $F          = shift;
+    my $bad_record = "\0" x 8192;
+    open my $fh, '<', $F->{ 'filename' } or croak( "Cannot read file " . $F->{ 'filename' } . ": $OS_ERROR\n" );
+    $INPUT_RECORD_SEPARATOR = \8192;
+    my $i = 0;
+    while ( my $l = <$fh> ) {
+        if ( $bad_record eq $l ) {
+            my $what = 'table';
+            $what = 'index' if $F->{'what'} eq 'i';
+            $what = 'toast' if $F->{'what'} eq 't';
+            printf "\nBad page #%d in %s %s ( file: %s )\n", 1 + $F->{ 'offset' } + $i, $what, $F->{ 'name' }, $F->{ 'filename' };
+        }
+        $i++;
+    }
+    close $fh;
+    return;
+}
+
+sub new {
+    my $class = shift;
+    my $self  = {};
+    bless $self, $class;
+    return $self;
+}
+
+sub run {
+    my $self = shift;
+    $self->read_options();
+    $self->get_meta_information();
+    $self->show_running_details();
+    $self->limit_relations();
+    $self->confirm_work();
+
+    $self->run_scan();
+    return;
+}
+
+sub run_scan {
+    my $self = shift;
+    $self->make_list_of_files();
+    $self->scan_in_parallel();
+    return;
+}
+
+sub make_list_of_files {
+    my $self  = shift;
+    my @files = ();
+    for my $i ( @{ $self->{ 'relations' } } ) {
+        my $size = $i->{ 'relation_size' };
+        next if 0 == $size;
+
+        my $base_filename;
+        if ( $self->{ 'database_version' } < 90000 ) {
+            my $base_path = defined $i->{ 'tablespace_path' } ? $i->{ 'tablespace_path' } : File::Spec->catdir( $self->{ 'datadir' }, 'base' );
+            $base_filename = File::Spec->catfile( $base_path, $self->{ 'database_oid' }, $i->{ 'relation_file' } );
+        }
+        else {
+            $base_filename = File::Spec->catfile( $self->{ 'datadir' }, $i->{ 'relation_file' } );
+        }
+
+        my $max               = 1024**3;
+        my $pages_per_segment = $max / ( 8 * 1024 );
+        my @sizes             = ( $max ) x ( floor( $size / $max ) );
+        push @sizes, $size % $max;
+
+        my $num = 0;
+        for my $s ( @sizes ) {
+            my $f = {};
+            my $suffix = $num ? ".$num" : "";
+
+            $f->{ 'size' }     = $s;
+            $f->{ 'offset' }   = $num * $pages_per_segment;
+            $f->{ 'filename' } = $base_filename . $suffix;
+            $f->{ 'what' }     = $i->{ 'relation_kind' };
+            $f->{ 'name' }     = $i->{ 'fullname' };
+            $f->{ 'toast' }    = $i->{ 'toast_for_schema' } . '.' . $i->{ 'toast_for_name' }
+                if defined $i->{ 'toast_for_schema' };
+
+            push @files, $f;
+            $num++;
+
+        }
+    }
+
+    @files = sort { $b->{ 'size' } <=> $a->{ 'size' } } @files;
+    $self->{ 'files' } = \@files;
+    return;
+}
+
+sub limit_relations {
+    my $self    = shift;
+    my @to_work = ();
+    if ( $self->{ 'match' } ) {
+        @to_work = grep { $_->{ 'fullname' } =~ $self->{ 'match' } } @{ $self->{ 'relations' } };
+    }
+    else {
+        @to_work = grep { $_->{ 'fullname' } !~ $self->{ 'negative-match' } } @{ $self->{ 'relations' } };
+    }
+    $self->{ 'relations' } = \@to_work;
+    return;
+}
+
+sub get_meta_information {
+    my $self = shift;
+
+    my $server_info = $self->psql(
+        q{
+            SET search_path = pg_catalog;
+            SELECT
+                current_user,
+                d.datname,
+                d.oid,
+                current_setting('data_directory'),
+                current_setting('server_version_num')
+            FROM
+                pg_database d
+            WHERE
+                d.datname = current_database()
+            ;
+        }
+    );
+    @{ $self }{ qw( database_user database_name database_oid datadir database_version ) } = @{ $server_info->[ 0 ] };
+    my $query = q{
+            SET search_path = pg_catalog;
+            SELECT
+                n.nspname,
+                c.relname,
+                c.relkind,
+                c.relfilenode,
+                pg_relation_size(c.oid),
+                tn.nspname,
+                tc.relname,
+                t.spclocation
+            FROM
+                pg_class c
+                join pg_namespace n on c.relnamespace = n.oid
+                left outer join pg_tablespace t on c.reltablespace = t.oid
+                left outer join pg_class tc on c.relname ~ '^pg_toast_[0-9]+(_index)?$' AND tc.oid::text = regexp_replace( c.relname, '[^0-9]+', '', 'g')
+                left outer join pg_namespace tn on tc.relnamespace = tn.oid
+            WHERE
+                c.relkind in ('r', 'i', 't')
+                AND c.relfilenode > 0
+                AND pg_relation_size(c.oid) > 0
+            ;
+        };
+    if ( $self->{ 'database_version' } >= 90000 ) {
+        $query = q{
+            SET search_path = pg_catalog;
+            SELECT
+                n.nspname,
+                c.relname,
+                c.relkind,
+                pg_relation_filepath( c.oid ),
+                pg_relation_size(c.oid),
+                tn.nspname,
+                tc.relname,
+                t.spclocation
+            FROM
+                pg_class c
+                join pg_namespace n on c.relnamespace = n.oid
+                left outer join pg_tablespace t on c.reltablespace = t.oid
+                left outer join pg_class tc on c.relname ~ '^pg_toast_[0-9]+(_index)?$' AND tc.oid::text = regexp_replace( c.relname, '[^0-9]+', '', 'g')
+                left outer join pg_namespace tn on tc.relnamespace = tn.oid
+            WHERE
+                c.relkind in ('r', 'i', 't')
+                AND c.relfilenode > 0
+                AND pg_relation_size(c.oid) > 0
+            ;
+        };
+
+    }
+    my $relations_info = $self->psql( $query );
+
+    my @relations = ();
+    for my $row ( @{ $relations_info } ) {
+        my $i = {};
+        @{ $i }{ qw(schema_name relation_name relation_kind relation_file relation_size toast_for_schema toast_for_name tablespace_path) } = @{ $row };
+        $i->{ 'fullname' } = join '.', $i->{ 'schema_name' }, $i->{ 'relation_name' };
+        push @relations, $i;
+    }
+    $self->{ 'relations' } = [ sort { $b->{ 'relation_size' } <=> $a->{ 'relation_size' } || $a->{ 'fullname' } cmp $b->{ 'fullname' } } @relations ];
+    return;
+}
+
+sub confirm_work {
+    my $self = shift;
+    while ( 1 ) {
+        printf "\n\nAre you sure you want to continue?\n";
+        printf "Enter YES to continue, or LIST to list objects that will be checked: ";
+        my $input = <STDIN>;
+        return if $input =~ m{\AYES\r?\n?\z};
+        if ( $input =~ m{\ALIST\r?\n?\z} ) {
+            print "- $_\n" for sort map { $_->{ 'fullname' } } @{ $self->{ 'relations' } };
+            next;
+        }
+        exit;
+    }
+}
+
+sub show_running_details {
+    my $self = shift;
+
+    printf "Config:\n";
+    for my $key ( sort qw( psql jobs negative-match match ) ) {
+        printf "%-15s : %s\n", $key, ( $self->{ $key } || '' ),;
+    }
+
+    my @tables = map { $_->{ 'fullname' } }
+        grep { 'r' eq $_->{ 'relation_kind' } } @{ $self->{ 'relations' } };
+    splice( @tables, 5 );
+
+    printf "\nDatabase details:\n";
+    printf "User           : %s\n", $self->{ 'database_user' };
+    printf "Database       : %s\n", $self->{ 'database_name' };
+    printf "Largest tables : %s\n", shift @tables;
+    printf "               : %s\n", $_ for @tables;
+    return;
+}
+
+sub read_options {
+    my $self = shift;
+
+    my $opts = {
+        'psql'           => 'psql',
+        'jobs'           => 1,
+        'negative-match' => undef,
+        'match'          => undef,
+    };
+
+    my $is_ok = GetOptions( $opts, qw( help|? jobs|j=i psql|p=s match|m=s negative-match|n=s) );
+
+    pod2usage( '-verbose' => 1, ) unless $is_ok;
+    pod2usage( '-verbose' => 99, '-sections' => [ qw( DESCRIPTION SYNOPSIS OPTIONS ) ] ) if $opts->{ 'help' };
+
+    pod2usage( '-message' => 'Number of jobs has to be not-empty.' ) if '' eq $opts->{ 'jobs' };
+    $opts->{ 'jobs' } = int( $opts->{ 'jobs' } );
+    pod2usage( '-message' => 'Number of jobs cannot be less than 1.' )   if 1 > $opts->{ 'jobs' };
+    pod2usage( '-message' => 'Number of jobs cannot be more than 100.' ) if 100 < $opts->{ 'jobs' };
+
+    pod2usage( '-message' => 'You cannot provide both --match and --negative-match.' )   if ( $opts->{ 'match' } )  && ( $opts->{ 'negative-match' } );
+    pod2usage( '-message' => 'You have to provide either --match or --negative-match.' ) if ( !$opts->{ 'match' } ) && ( !$opts->{ 'negative-match' } );
+
+    if ( $opts->{ 'match' } ) {
+        delete $opts->{ 'negative-match' };
+        my $t = $opts->{ 'match' };
+        $opts->{ 'match' } = qr{$t};
+    }
+    else {
+        delete $opts->{ 'match' };
+        if ( $opts->{ 'negative-match' } ) {
+            my $t = $opts->{ 'negative-match' };
+            $opts->{ 'negative-match' } = qr{$t};
+        }
+        else {
+            delete $opts->{ 'negative-match' };
+        }
+    }
+
+    @{ $self }{ keys %{ $opts } } = values %{ $opts };
+    return;
+}
+
+sub psql {
+    my $self       = shift;
+    my $query      = shift;
+    my $query_file = shift;
+
+    my $remove_query_file = 1;
+
+    my $query_fh;
+    if ( defined $query_file ) {
+        $remove_query_file = 0;
+        open $query_fh, '>', $query_file or croak( "Cannot write to $query_file: $OS_ERROR\n" );
+    }
+    else {
+        ( $query_fh, $query_file ) = tempfile( 'fast.dump.XXXXXXXX', 'TMPDIR' => 1, );
+    }
+
+    print $query_fh $query;
+    close $query_fh;
+    my $output = $self->run_command( qw( psql -qAtX -F ), "\t", '-f', $query_file );
+    unlink $query_file if $remove_query_file;
+
+    my @rows = grep { '' ne $_ } split /\r?\n/, $output;
+    my @data = map { [ split /\t/, $_ ] } @rows;
+
+    return \@data;
+}
+
+sub run_command {
+    my $self = shift;
+    my ( @cmd ) = @_;
+
+    # Use paths provided by user as command line options
+    $cmd[ 0 ] = $self->{ $cmd[ 0 ] } if $self->{ $cmd[ 0 ] };
+
+    my $real_command = join( ' ', map { quotemeta } @cmd );
+
+    my ( $stdout_fh, $stdout_filename ) = tempfile( 'fast.dump.XXXXXXXX', 'DIR' => $self->{ 'tmpdir' }, );
+    my ( $stderr_fh, $stderr_filename ) = tempfile( 'fast.dump.XXXXXXXX', 'DIR' => $self->{ 'tmpdir' }, );
+
+    $real_command .= sprintf ' 2>%s >%s', quotemeta $stderr_filename, quotemeta $stdout_filename;
+
+    system $real_command;
+    local $/ = undef;
+    my $stdout = <$stdout_fh>;
+    my $stderr = <$stderr_fh>;
+
+    close $stdout_fh;
+    close $stderr_fh;
+
+    unlink( $stdout_filename, $stderr_filename );
+
+    my $error_code;
+    if ( $CHILD_ERROR == -1 ) {
+        $error_code = $OS_ERROR;
+    }
+    elsif ( $CHILD_ERROR & 127 ) {
+        $error_code = sprintf "child died with signal %d, %s coredump\n", ( $CHILD_ERROR & 127 ), ( $CHILD_ERROR & 128 ) ? 'with' : 'without';
+    }
+    else {
+        $error_code = $CHILD_ERROR >> 8;
+    }
+
+    croak( "Couldn't run $real_command : " . $stderr ) if $error_code;
+
+    return $stdout;
+}
+
+=head1 NAME
+
+check.zero.pages - Program to scan data files of PostgreSQL and report all pages that have all chr(0) content.
+
+=head1 SYNOPSIS
+
+check.zero.pages [--jobs=n] [--psql=/usr/bin/psql] [--help] [--match=^public] [--negative-match=^pg_]
+
+=head1 OPTIONS
+
+=over
+
+=item --jobs - how many concurrent processes to run when scanning files.
+Defaults to 1.
+
+=item --psql - path to psql program. Defaults to "psql", which will use
+$PATH environment variable to find it.
+
+=item --match - perl regular expression that (if given) will be used to
+limit objects (tables/indexes) to those matching regular expression.
+
+=item --negative-match - perl regular expression that (if given) will be
+used to limit objects (tables/indexes) to those B<not> matching the
+expression.
+
+=item --help - shows information about usage of the program.
+
+=back
+
+Important - you cannot provide both --match and --negative-match in the same
+call.
+
+All options can be given in abbreviated version, using single dash character
+and first letter of option, like:
+
+    check.zero.pages -p /opt/pgsql/bin/psql -j 32 -m ^pg
+
+Database connection details should be given using PG* environment variables.
+
+=head1 DESCRIPTION
+
+This program can be used to quickly (relatively) scan whole database to see
+if there are any pages within tables and/or indexes that contain only chr(0)
+bytes. Such pages will cause problems when using the table/index, and it
+should be checked/fixed as soon as possible.
