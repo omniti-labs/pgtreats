@@ -1,0 +1,36 @@
+. ~/.curo/c/curo_mktemp
+
+find_all_actions() {
+    tmp_file="$( curo_mktemp )"
+
+    while read sql_filename
+    do
+        action_name="$( basename "$sql_filename" .sql )"
+        dsc="$( sed -ne '1p' ~/.curo/s/"$action_name".sql )"
+        if [[ "${dsc:0:3}" == "-- " ]]
+        then
+            dsc="${dsc:3}"
+        else
+            dsc="$action_name"
+        fi
+        printf '%s|%s\n' "$dsc" "$action_name"
+    done < <( 
+        find ~/.curo/s -type f -name '*.sql' | \
+            egrep -v '(setup|menu)\.sql$' | \
+            egrep -v '\.curo/s/.*/'
+        ) | sort > "$tmp_file"
+
+    r_find_all_actions_action=()
+    r_find_all_actions_name=()
+    i=0
+    while read line
+    do
+        r_find_all_actions_action[$i]="${line##*|}"
+        r_find_all_actions_name[$i]="${line%%|*}"
+        (( i++ ))
+    done < "$tmp_file"
+
+    rm -f "$tmp_file"
+}
+
+# vim: set ft=sh :
