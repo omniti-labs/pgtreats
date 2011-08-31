@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 fifo=~/.curo/s/activity/fifo
 rm -f "$fifo"
 

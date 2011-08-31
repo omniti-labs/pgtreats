@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 left_title="Curo : Current activity"
 right_title="$( uptime )"

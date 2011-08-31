@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 . ~/.curo/c/find_all_actions
 . ~/.curo/c/dialog_menu
