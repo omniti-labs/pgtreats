@@ -9,7 +9,7 @@ title="$( printf "%s%${spacing}s%s" "$left_title" "" "$right_title" )"
 
 clear
 echo " $title"
-printf -v line "%${COLUMNS}s"
+line="$( printf "%${COLUMNS}s" )"
 printf "%s\n\n" "${line// /-}"
 
 cat ~/.curo/s/activity/query.1.out
