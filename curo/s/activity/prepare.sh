@@ -4,11 +4,13 @@ rm -f "$fifo"
 
 mkfifo "$fifo"
 
+display_sh="$HOME/.curo/s/activity/display.sh"
+
 while true
 do
     echo "\\o ~/.curo/s/activity/query.1.out"
     echo "\\i ~/.curo/s/activity/query.1.sql"
     echo "\\o"
-    echo "\\! ~/.curo/s/activity/display.sh"
+    echo "\\! $display_sh"
     sleep 1
 done > "$fifo" 2>/dev/null < /dev/null &
