@@ -1,5 +1,5 @@
 curo_mktemp() {
-    mktemp --tmpdir curo.$UID.XXXXXXXXX
+    mktemp -t curo.$UID.XXXXXX
 }
 
 # vim: set ft=sh :
