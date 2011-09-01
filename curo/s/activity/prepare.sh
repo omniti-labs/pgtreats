@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. ~/.curo/config.sh
+
 fifo=~/.curo/s/activity/fifo
 rm -f "$fifo"
 

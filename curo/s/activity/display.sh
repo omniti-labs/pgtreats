@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. ~/.curo/config.sh
 
 left_title="Curo : Current activity"
 right_title="$( uptime )"
