@@ -22,11 +22,17 @@ find_all_actions() {
 
     r_find_all_actions_action=()
     r_find_all_actions_name=()
+    r_find_all_actions_wait=()
     i=0
     while read line
     do
         r_find_all_actions_action[$i]="${line##*|}"
-        r_find_all_actions_name[$i]="${line%%|*}"
+        name="${line%%|*}"
+        if [[ "$name" != "${name%!menuwait}" ]]
+        then
+            r_find_all_actions_wait[$i]="wait"
+        fi
+        r_find_all_actions_name[$i]="${name%!menuwait}"
         (( i++ ))
     done < "$tmp_file"
 

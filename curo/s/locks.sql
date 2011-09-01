@@ -1,4 +1,4 @@
--- Locks information
+-- Locks information!menuwait
 SELECT
     l.*
 FROM

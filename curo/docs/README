@@ -1,7 +1,7 @@
 Requirements:
 
 To make use of Curo, you need to have:
-1. psql
+1. psql (version 8.3 or later)
 2. bash
 3. dialog
 

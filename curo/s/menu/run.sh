@@ -29,6 +29,13 @@ use_idx="$r_dialog_menu"
 
 (
     printf "\\i ~/.curo/s/%q.sql\n" "${commands[$use_idx]}"
-    echo "\\! read -p \"press enter> \" _"
+    if (( $use_idx > 0 ))
+    then
+        if [[ ${r_find_all_actions_wait[$(( $use_idx - 1 )) ]} == "wait" ]]
+        then
+            echo "\\prompt 'press enter> ' _"
+        fi
+    fi
     echo "\\i ~/.curo/s/menu.sql"
 ) > "$sql"
+
