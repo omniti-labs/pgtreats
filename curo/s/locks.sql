@@ -3,7 +3,7 @@ SELECT
     l.*
 FROM
     pg_locks l
-    join pg_database d on coalesce(l.database, d.oid) = d.oid
+    join pg_stat_activity a on l.pid = a.procpid
 WHERE
-    d.datname = current_database()
+    a.datname = current_database()
 ;

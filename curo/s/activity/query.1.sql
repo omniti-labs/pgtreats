@@ -28,6 +28,7 @@ FROM
 WHERE
     current_query <> '<IDLE>'
     AND procpid <> pg_backend_pid()
+    AND datname = current_database()
 ORDER BY
     xact_start
 ;
