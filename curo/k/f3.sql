@@ -1,1 +1,1 @@
-\i ~/.curo/s/locks.sql
+\i ~/.curo/s/menu.sql

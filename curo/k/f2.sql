@@ -1,1 +1,1 @@
-\i ~/.curo/s/activity.sql
+\i ~/.curo/s/menu.sql
