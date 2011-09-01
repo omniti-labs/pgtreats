@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. ~/.curo/config.sh
+. ~/.curo/c/set_terminal_size
 
 fifo=~/.curo/s/activity/fifo
 rm -f "$fifo"

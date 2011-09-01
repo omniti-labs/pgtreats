@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. ~/.curo/config.sh
+. ~/.curo/c/set_terminal_size
 
 . ~/.curo/c/find_all_actions
 . ~/.curo/c/dialog_menu
