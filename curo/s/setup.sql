@@ -1,1 +1,1 @@
-\! ~/.curo/s/setup/setup.sh
+\! $HOME/.curo/s/setup/setup.sh
