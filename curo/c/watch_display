@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 . ~/.curo/c/set_terminal_size
 
-left_title="Curo : Current activity"
+left_title="Curo : $1"
+data_file="$2"
+
 right_title="$( uptime )"
 
 spacing=$(( COLUMNS - ${#left_title} - ${#right_title} - 2 ))
@@ -13,5 +15,7 @@ echo " $title"
 line="$( printf "%${COLUMNS}s" )"
 printf "%s\n\n" "${line// /-}"
 
-cat ~/.curo/s/activity/query.1.out
-rm ~/.curo/s/activity/query.1.out
+cat "$data_file"
+rm "$data_file"
+
+# vim: set ft=sh :

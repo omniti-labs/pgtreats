@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+
+sql_file="$1"
+fifo="$2"
+watch_title="$3"
+
+out_file="$sql_file.out"
+
+rm -f "$fifo"
+mkfifo "$fifo"
+
+display_sh="$HOME/.curo/c/watch_display"
+
+while true
+do
+    echo "\\o $out_file"
+    echo "\\i $sql_file"
+    echo "\\o"
+    printf "\\! $display_sh %q %q\n" "$watch_title" "$out_file"
+    printf "\\! $display_sh %q %q\n" "$watch_title" "$out_file" >> /tmp/qq.log
+    sleep 1
+done > "$fifo" 2>/dev/null < /dev/null &
+
+# vim: set ft=sh :
