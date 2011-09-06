@@ -1,5 +1,0 @@
-curo_mktemp() {
-    mktemp -t curo.$UID.XXXXXX
-}
-
-# vim: set ft=sh :
