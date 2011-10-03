@@ -151,7 +151,7 @@ sub operation {
       # time (ip(port)) [pid]: [?-?] dsn LOG:  duration: <time>  statement: <statement>
       my $ts = strftime "%Y-%m-%d %H:%M:%S UTC", gmtime(int($q->{start_time}));
       (my $qoneline = $q->{query}) =~ s/[\r\n]/ /gm;
-      printf "%s (%s(%d)) [1]: [1-1] user=unknown,db=unknown LOG:  duration: %.3f ms  statement: %s\n",
+      printf $log_output "%s (%s(%d)) [1]: [1-1] user=unknown,db=unknown LOG:  duration: %.3f ms  statement: %s\n",
              $ts, $q->{connection}->src_host, $q->{connection}->src_port, $q->{query_time} * 1000, $qoneline;
     } else {
       printf $log_output "%s %s:%d %.3f $q->{tuples} $q->{query}\n",

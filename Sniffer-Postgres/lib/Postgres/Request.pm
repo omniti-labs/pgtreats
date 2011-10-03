@@ -53,6 +53,12 @@ sub parse {
   my $buf = shift;
   my $self = bless { whence => shift }, $class;
 
+  my $type = substr($$buf, 0, 1);
+  if(!exists($types->{$type})) {
+    warn "unknown Request type: $type\n";
+    $$buf = '';
+    return undef;
+  }
   # special case for cancel query
   if(unpack("N", substr($$buf, 0, 4)) == 16 &&
      unpack("N", substr($$buf, 4, 4)) == 80877102) {
@@ -61,7 +67,7 @@ sub parse {
     return $self;
   }
 
-  my $type = substr($$buf, 0, 1);
+  return undef if(length($$buf) < 5);
   my $len = unpack("N", substr($$buf, 1, 4));
   # short-circuit the short packet.
   return undef if(length($$buf) - 1 < $len);

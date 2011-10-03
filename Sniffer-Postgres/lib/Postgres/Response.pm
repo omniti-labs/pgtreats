@@ -49,11 +49,16 @@ sub parse {
   my $class = shift;
   my $buf = shift;
   my $self = bless { whence => shift }, $class;
+  my $type = substr($$buf, 0, 1);
 
+  if(!exists($types->{$type})) {
+    warn "unknown Response type: $type\n";
+    $$buf = '';
+    return undef;
+  }
   # Gotta start somewhere
   return undef if (length($$buf) < 5);
 
-  my $type = substr($$buf, 0, 1);
   my $len = unpack("N", substr($$buf, 1, 4));
 
   # short-circuit the short packet.
