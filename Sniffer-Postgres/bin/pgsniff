@@ -76,6 +76,10 @@ If this option is specified, it will attempt to start analyzing TCP
 sessions that are currently "in flight" by noticing packets targeted
 at the specified destination tcp C<port>.
 
+=item -m
+
+If specified, times reported will be shown with microsecond precision.
+
 =back
 
 An optional BPF filter string may be specified to limit the packet capture
@@ -116,6 +120,7 @@ my $VERBOSE = 0;
 my $inflight = 0;
 my $limit = 0;
 my $topn = 100;
+my $ms = 0;
 my $device;
 my $file;
 my $logfile;
@@ -130,6 +135,7 @@ GetOptions(
   "t=i" => \$topn,
   "l=s" => \$logfile,
   "hist" => \$histogram,
+  "m" => \$ms,
 );
 my $filter = shift;
 die "one of -f <file> or -d <device> is required\n"
@@ -149,13 +155,17 @@ sub operation {
   if ($log_output) {
     if ($pgformat) {
       # time (ip(port)) [pid]: [?-?] dsn LOG:  duration: <time>  statement: <statement>
-      my $ts = strftime "%Y-%m-%d %H:%M:%S UTC", gmtime(int($q->{start_time}));
+      my $ts = strftime "%Y-%m-%d %H:%M:%S", gmtime(int($q->{end_time}));
+      if ( $ms ) {
+          $ts .= sprintf '.%06d', ( 1_000_000 * $q->{'end_time'} ) % 1_000_000;
+      }
+      $ts .= ' UTC';
       (my $qoneline = $q->{query}) =~ s/[\r\n]/ /gm;
       printf $log_output "%s (%s(%d)) [1]: [1-1] user=unknown,db=unknown LOG:  duration: %.3f ms  statement: %s\n",
              $ts, $q->{connection}->src_host, $q->{connection}->src_port, $q->{query_time} * 1000, $qoneline;
     } else {
       printf $log_output "%s %s:%d %.3f $q->{tuples} $q->{query}\n",
-             $q->{start_time}, $q->{connection}->src_host, $q->{connection}->src_port,
+             $q->{end_time}, $q->{connection}->src_host, $q->{connection}->src_port,
              $q->{query_time} * 1000;
     }
   }
