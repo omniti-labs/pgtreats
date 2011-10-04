@@ -37,6 +37,7 @@ my $types = {
   's' => { name => 'Portal Suspend' },
   'Z' => { name => 'Ready', complete => 1 },
   'T' => { name => 'Row Description' },
+  'R' => { name => 'Authentication' },
 };
 
 sub is_complete {
@@ -49,13 +50,17 @@ sub parse {
   my $class = shift;
   my $buf = shift;
   my $self = bless { whence => shift }, $class;
+  my $inflight = shift;
   my $type = substr($$buf, 0, 1);
 
   if(!exists($types->{$type})) {
-    warn "unknown Response type: $type\n";
+    if(!$$inflight) {
+      warn "unknown Response type: $type\n";
+    }
     $$buf = '';
     return undef;
   }
+  $$inflight = 0;
   # Gotta start somewhere
   return undef if (length($$buf) < 5);
 

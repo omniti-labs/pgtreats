@@ -144,7 +144,7 @@ to keep track of the packet order and resent packets.
 =cut
 
 sub find_or_create_connection {
-  my ($self,$tcp) = @_;
+  my ($self,$tcp,$inflight) = @_;
 
   my $connections = $self->connections;
 
@@ -159,6 +159,7 @@ sub find_or_create_connection {
       my $o = Sniffer::Connection::Postgres->new(
         %$c,
         tcp            => $tcp,
+        inflight       => $inflight
       );
       $connections->{$key} = $o;
     } else {
@@ -271,7 +272,7 @@ sub handle_ip_packet {
   $i->{hlen} = 5
       if $i->{hlen} < 5;
   my $conn = $self->handle_tcp_packet(substr($i->{data}, 0, $i->{len}-($i->{hlen}*4)), $ts);
-  unless($conn->tcp_connection->dest_host) {
+  unless(!$conn || $conn->tcp_connection->dest_host) {
     $conn->tcp_connection->dest_host($i->{dest_ip});
     $conn->tcp_connection->src_host($i->{src_ip});
   }
@@ -298,8 +299,10 @@ sub handle_tcp_packet {
   $ts ||= time();
   if (! ref $tcp) {
     $tcp = NetPacket::TCP->decode($tcp);
+    return undef if(!exists($tcp->{src_port}) ||
+                    !exists($tcp->{dest_port}));
   }
-  my $conn = $self->find_or_create_connection($tcp);
+  my $conn = $self->find_or_create_connection($tcp, $self->inflight);
 
   # This hacks mid-stream sessions
   if(not defined $conn->tcp_connection->status) {

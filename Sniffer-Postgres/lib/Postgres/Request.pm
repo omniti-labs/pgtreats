@@ -52,13 +52,17 @@ sub parse {
   my $class = shift;
   my $buf = shift;
   my $self = bless { whence => shift }, $class;
+  my $inflight = shift;
 
   my $type = substr($$buf, 0, 1);
   if(!exists($types->{$type})) {
-    warn "unknown Request type: $type\n";
+    if(!$$inflight) {
+      warn "unknown Request type: $type\n";
+    }
     $$buf = '';
     return undef;
   }
+  $$inflight = 0;
   # special case for cancel query
   if(unpack("N", substr($$buf, 0, 4)) == 16 &&
      unpack("N", substr($$buf, 4, 4)) == 80877102) {

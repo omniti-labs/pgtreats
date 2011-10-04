@@ -44,6 +44,8 @@ sub new {
   };
 
   my $tcp_log = delete $args{tcp_log} || sub {};
+  my $inflight = (defined $args{inflight} && $args{inflight} != 0);
+  delete $args{inflight};
 
   my $self = $class->SUPER::new(\%args);
   $self->tcp_connection(Sniffer::Connection->new(
@@ -52,6 +54,7 @@ sub new {
     received_data => sub { $self->received_data(@_) },
     closed        => sub {},
     teardown      => sub { $self->closed->($self) },
+    inflight      => $inflight,
     log           => $tcp_log,
   ));
 
@@ -124,7 +127,7 @@ sub flush_received {
   while ($$buffer) {
     if (! (my $res = $self->_response)) {
       # We need to find something that looks like a valid Postgres request in our stream
-      $res = Postgres::Response->parse($buffer, $conn ? $conn->last_activity : undef);
+      $res = Postgres::Response->parse($buffer, $conn ? $conn->last_activity : undef, \$conn->{inflight});
       return if not defined($res);
       $self->_response($res);
     };
@@ -149,7 +152,7 @@ sub flush_sent {
   my $buffer = $self->sent_buffer;
   while ($$buffer) {
     if (! (my $req = $self->_request)) {
-      $req = Postgres::Request->parse($buffer, $conn->last_activity);
+      $req = Postgres::Request->parse($buffer, $conn->last_activity, \$conn->{inflight});
       return if not defined($req);
       $self->_request($req);
     };
