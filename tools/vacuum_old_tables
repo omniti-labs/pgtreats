@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+
+# config
+vacuum_tables_older_than=950000000
+
+run_from=4
+run_to=12
+# config
+
+# functions
+check_if_time_is_ok() {
+    current_hour="$( date +%H )"
+    if (( $run_from > $run_to ))
+    then
+        if (( $current_hour < $run_from && $current_hour >= $run_to ))
+        then
+            exit
+        fi
+    else
+        if (( $current_hour < $run_from || $current_hour >= $run_to ))
+        then
+            exit
+        fi
+    fi
+}
+# functions
+
+export PGPORT=6666
+while read PGDATABASE
+do
+    export PGDATABASE
+    while read table_name
+    do
+        current_hour="$( date +%H )"
+        check_if_time_is_ok
+        vacuumdb -z -t "$table_name"
+    done < <( psql -qAtX -c "SELECT oid::regclass FROM pg_class WHERE relkind = 'r' AND age(relfrozenxid) > $vacuum_tables_older_than ORDER BY age( relfrozenxid ) DESC" )
+done < <( psql -qAtX -c 'select datname from pg_database where datallowconn order by 1' )
