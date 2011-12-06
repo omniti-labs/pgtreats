@@ -1,0 +1,5 @@
+These files can be used with the INHERIT option of tail_n_mail in the main configuration file to exclude items which may not be of quite as much importance to a Postgresql admin.
+
+tnm8.cfg contains filters for use with Postgresql 8.x and earlier.
+
+tnm9.cfg takes advantage of the %e parameter added in 9.x to add the error codes to postgres log lines. Just make sure the %e is the last item in the log_line_prefix defined in postgresql.conf and set the .tailnmailrc file (where you tell tail_n_mail your log_line_prefix pattern) to NOT include the %e as part of the pattern so it can be matched against.
