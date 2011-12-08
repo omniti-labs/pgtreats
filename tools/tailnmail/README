@@ -3,3 +3,8 @@ These files can be used with the INHERIT option of tail_n_mail in the main confi
 tnm8.cfg contains filters for use with Postgresql 8.x and earlier.
 
 tnm9.cfg takes advantage of the %e parameter added in 9.x to add the error codes to postgres log lines. Just make sure the %e is the last item in the log_line_prefix defined in postgresql.conf and set the .tailnmailrc file (where you tell tail_n_mail your log_line_prefix pattern) to NOT include the %e as part of the pattern so it can be matched against.
+
+tnm9_pgf.cfg is for servers that are also running PGFouine with Postgres 9+. Currently, the only way to get the error code added to the log_line_prefix without breaking PGFouine it is to add another key/value pair to the end where the user/db names are given. This config file is assuming you added it on the end similar to the following example:
+log_line_prefix = '%t (%r) [%p]: [%l-1] user=%u,db=%d,e=%e: '
+Then leave the error code section out of your .tailnmailrc file so that tail_n_mail can match against it like this
+log_line_prefix = '%t (%r) [%p]: [%l-1] user=%u,db=%d,'
