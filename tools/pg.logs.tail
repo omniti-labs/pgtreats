@@ -1,0 +1,123 @@
+#!/usr/bin/env perl
+package main;
+Pg::Logs::Tail->new()->run();
+exit;
+
+package Pg::Logs::Tail;
+use strict;
+use warnings;
+use English qw( -no_match_vars );
+use File::Spec;
+use Time::HiRes;
+use Getopt::Long;
+use Data::Dumper;
+use IO::Handle;
+
+sub new {
+    my $class = shift;
+    return bless {}, $class;
+}
+
+sub run {
+    my $self = shift;
+    $self->{'out'} = \*STDOUT;
+    $self->read_args();
+    $self->find_newest_file();
+    $self->tail_file();
+    return;
+}
+
+sub tail_file {
+    my $self = shift;
+
+    my $fails = 0;
+    my $fh = $self->{'fh'};
+
+    while (1) {
+        my $line = <$fh>;
+        if ( defined $line ) {
+            print $line;
+            $self->{'out'}->flush();
+            next;
+        }
+        $fails++;
+        Time::HiRes::sleep( 0.1 );
+        next if $fails < 10;
+        $self->find_newest_file();
+        $fh = $self->{'fh'};
+        $fails = 0;
+    }
+}
+
+sub read_args {
+    my $self = shift;
+    my $log_directory = '.';
+    my $log_filename = 'postgresql-.*\.log';
+    my $verbose;
+    my $help;
+
+    die "Error while getting options!" unless GetOptions(
+        'directory|d=s'  =>  \$log_directory,
+        'filename|f=s'   =>  \$log_filename,
+        'verbose|v'      =>  \$verbose,
+        'help|h|?'       =>  \$help,
+    );
+
+    $self->show_help_and_die() if $help;
+    $self->{'verbose'} = $verbose;
+    $self->{'dir'} = $log_directory;
+    $self->{'file_re'} = qr{\A$log_filename\z};
+    return;
+}
+
+sub find_newest_file {
+    my $self = shift;
+    my $dir_path = $self->{'dir'};
+    my $fn_re = $self->{'file_re'};
+
+    opendir my $dir, $dir_path or die "Cannot open directory $dir_path: $OS_ERROR\n";
+    my @files = grep { $_ =~ $fn_re } readdir( $dir );
+    closedir $dir;
+
+    die "No files matching $fn_re in $dir_path ?!\n" if 0 == scalar @files;
+
+    my @sorted_files =
+        map { $_->[0] }
+        sort { $b->[1] <=> $a->[1] }
+        map { [ $_, ( stat( $_ ) )[9] ] }
+        map { File::Spec->catfile( $dir_path, $_ ) }
+        @files;
+
+    my $use_file = shift @sorted_files;
+
+    return if defined $self->{'current_file_name'} and $self->{'current_file_name'} eq $use_file;
+    $self->{'current_file_name'} = $use_file;
+
+    close $self->{'fh'} if defined $self->{'fh'};
+    open my $fh, '<', $use_file or die "Cannot open file $use_file: $OS_ERROR\n";
+    $self->{'fh'} = $fh;
+
+    print STDERR ">>> File changed to $use_file\n" if $self->{'verbose'};
+
+    return;
+}
+
+sub show_help_and_die {
+    my $self = shift;
+    print <<_EOHELP_;
+Syntax:
+    $PROGRAM_NAME [-d ...] [-f ...] [-v]
+
+Options:
+    --directory (-d) - directory in which logs exist
+    --filename  (-f) - regexp to match log filenames
+    --verbose   (-v) - show information when switching log file
+    --help      (-h) - show this help page
+
+Defaults:
+   -d .
+   -f 'postgresql-.*\\.log'
+_EOHELP_
+   exit(1);
+}
+
