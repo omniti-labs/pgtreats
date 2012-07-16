@@ -5,6 +5,7 @@
 ## Developed at End Point Corporation by:
 ## Greg Sabino Mullane <greg@endpoint.com>
 ## Selena Deckelmann <selena@chesnok.com>
+## See more contributors in the 'Changes' file
 ## BSD licensed
 ## For full documentation, please see: http://bucardo.org/wiki/Tail_n_mail
 
@@ -24,7 +25,7 @@ use File::Basename qw( dirname             );
 use POSIX          qw( strftime localeconv );
 use 5.008003;
 
-our $VERSION = '1.22.1';
+our $VERSION = '1.26.0';
 
 ## Default message subject if not set elsewhere. Keywords replaced: FILE HOST NUMBER UNIQUE
 my $DEFAULT_SUBJECT= 'Results for FILE on host: HOST UNIQUE : NUMBER';
@@ -80,7 +81,9 @@ my %arg = (
 ## Set the minimum temp file size
               tempfile         => -1,
 ## Allow override of the log file to check
-              file             => '',
+              file             => [],
+## Strip out SQLSTATE codes from the FATAL and ERROR messages
+              sqlstate         => 0,
 ## Do not send email
               nomail           => 0,
 ## Flatten similar queries into a canonical form
@@ -97,6 +100,8 @@ my %arg = (
               showonly         => 0,
 ## Send an email even if 0 matches were found
               mailzero         => 0,
+## Append a signature to the end of mailed messages
+              mailsig          => [],
 ## Perform some final prettification of queries
               pretty_query     => 1,
 ## Set the minimum number of matching duration entries that we care about
@@ -135,7 +140,8 @@ my $result = GetOptions
    'offset=i',
    'duration=i',
    'tempfile=i',
-   'file=s',
+   'file=s@',
+   'sqlstate',
    'type=s',
    'flatten!',
    'hideflatten!',
@@ -153,6 +159,7 @@ my $result = GetOptions
    'mailpass=s',
    'mailport=s',
    'mailzero',
+   'mailsig=s@',
    'smtp',
    'tsep=s',
    'tsepnosub',
@@ -199,14 +206,13 @@ if ($configfile =~ /tempfile/i or $arg{tempfile} > 0) {
 }
 
 ## Quick expansion of leading tildes for the file argument
-$arg{file} =~ s{^~/?}{$ENV{HOME}/};
+for (@{ $arg{file} }) {
+    s{^~/?}{$ENV{HOME}/};
+}
 
 ## Save away our hostname
 my $hostname = qx{hostname};
 chomp $hostname;
-
-## We use a CURRENT key for future expansion
-my $curr = 'CURRENT';
 
 ## Global option variables
 my (%opt, %itemcomment);
@@ -233,7 +239,10 @@ my $original_llp = $llp;
 
 ## Process the log_line_prefix and change it into a regex
 my ($havetime,$havepid) = (0,0);
-$llp =~ s/([\-\[\]])/\\$1/g;
+
+## Escape certain things that may confuse the regex parser
+$llp =~ s/([\-\[\]\(\)])/\\$1/g;
+
 ## This assumes timestamp comes before the pid!
 $llp =~ s/%t/(\\d\\d\\d\\d\-\\d\\d\-\\d\\d \\d\\d:\\d\\d:\\d\\d \\w\\w\\w\\w?)/ and $havetime=1;
 $llp =~ s/%m/(\\d\\d\\d\\d\-\\d\\d\-\\d\\d \\d\\d:\\d\\d:\\d\\d\\.\\d+ \\w\\w\\w\\w?)/ and $havetime=1;
@@ -250,6 +259,7 @@ $llp =~ s/%u/[\\[\\w\\]]*/;
 $llp =~ s/%d/[\\[\\w\\]]*/;
 $llp =~ s/%r/\\S*/;
 $llp =~ s/%h/\\S*/;
+$llp =~ s/%a/\\S*/;
 
 if ($arg{pglog} eq 'syslog') {
     ## Syslog is a little more specific
@@ -299,7 +309,7 @@ $arg{verbose} and warn "  Log line prefix regex3: $pgpidre3\n";
 my $changes = 0;
 
 ## Global regex: may change per file
-my ($exclude, $include);
+my ($exclude, $include, $exclude_prefix);
 
 ## Note if we bumped into maxsize when trying to read a file
 my (%toolarge);
@@ -330,29 +340,50 @@ my ($string,$time,$csv);
 
 ## If they requested no lastfile, remove it now
 if ($arg{nolastfile}) {
-    delete $opt{$curr}{lastfile};
+    delete $opt{lastfile};
 }
 
+## If they want a mail signature, open the file(s) and read it in now
+if (defined $arg{mailsig}->[0]) {
+    ## Combine all files in order into a single string
+    my $sigstring = '';
+    my $fh;
+    for my $sigfile (@{$arg{mailsig}}) {
+        $sigfile =~ s{^~/?}{$ENV{HOME}/};
+        if (! open $fh, '<', $sigfile) {
+            warn qq{Could not open signature file "$sigfile": $!\n};
+            exit 1;
+        }
+        { local $/; $sigstring .= <$fh>; }
+        close $fh or warn qq{Could not close "$sigfile": $!\n};
+    }
+    $arg{mailsignature} = $sigstring;
+}
 
 ## Parse each file returned by pick_log_file until we start looping
 my $last_logfile = '';
 my @files_parsed;
+my $filenumber = 0;
+my $fileinfo = $opt{file}[$filenumber];
+
 {
+
     ## Generate the next log file to parse
-    my $logfile = pick_log_file();
+    my $logfile = pick_log_file($fileinfo);
 
-    ## If undefined, simply exit the loop
-    last if ! defined $logfile;
-
-    ## If it's the same as the last one we did, we are done
-    last if $last_logfile eq $logfile;
+    ## If undefined or same as last time, we are done with this file
+    if (! defined $logfile or $logfile eq $last_logfile) {
+        ## Grab the next extry
+        $fileinfo = $opt{file}[++$filenumber];
+        ## No more file? We are done!
+        last if ! defined $fileinfo;
+        # Otherwise, loop back with the new fileinfo
+        redo;
+    }
 
     $arg{debug} and warn " Parsing file: $logfile\n";
 
-    ## Force to CSV mode if the file ends in csv
-    $logfile =~ /\.csv/ and $arg{pglog} = 'csv';
-
-    my $count = parse_file($logfile);
+    my $count = parse_file($logfile, $fileinfo);
 
     if ($count >= 0) {
         push @files_parsed => [$logfile, $count];
@@ -364,10 +395,8 @@ my @files_parsed;
     redo;
 }
 
-$opt{$curr}{filename} = $last_logfile;
-
 ## We're done parsing the message, send an email if needed
-process_report() if $opt{grand_total} or $arg{mailzero} or $opt{$curr}{mailzero};
+process_report() if $opt{grand_total} or $arg{mailzero} or $opt{mailzero};
 final_cleanup();
 
 exit 0;
@@ -376,21 +405,20 @@ exit 0;
 sub pick_log_file {
 
     ## Figure out which files we need to parse
+    ## Sole argument is a hashref of file information:
+    ##   name: logfile to open
+    ##   original: original name
+    ##   lastfile: we scanned last time this ran. May be an empty string or not exist
+
+    my $info = shift;
+
+    my $name = $info->{name} or die 'No name for the file found!';
+    my $orig = $info->{original} or die 'No original file found!';
+    my $lastfile = $info->{lastfile} || '';
 
     ## Basic flow:
     ## Start with "last" (and apply offset to it)
     ## Then walk forward until we hit the most recent one
-
-    ## If a custom file, we always just return the main filename
-    ## We also remove the lastfile, as it's not important anymore
-    ## Same for a reset - we only want the latest file
-    if ($arg{file} or $arg{reset}) {
-        delete $opt{$curr}{lastfile};
-        return $arg{file} || $opt{$curr}{filename};
-    }
-
-    my $lastfile = $opt{$curr}{lastfile};
-    my $orig = $opt{$curr}{original_filename} || '';
 
     ## Handle the LATEST case right away
     if ($orig =~ s{([^/\\]*)LATEST([^/\\]*)$}{}o) {
@@ -400,98 +428,112 @@ sub pick_log_file {
         ## At this point, the lastfile has already been handled
         ## We need all files newer than that one, in order, until we run out
 
-        ## Already have the list? Pop off items until we are done
-        if (exists $opt{$curr}{middle_filenames}) {
-            ## Return the next file, or undef when we run out
-            return pop @{$opt{$curr}{middle_filenames}};
-        }
+        ## If we don't have the list already, build it now
+        if (! exists $opt{middle_filenames}) {
 
-        my $dir = $orig;
-        $dir =~ s{/\z}{};
-        -d $dir or die qq{Cannot open $dir: not a directory!\n};
-        opendir my $dh, $dir or die qq{Could not opendir "$dir": $!\n};
+            my $dir = $orig;
+            $dir =~ s{/\z}{};
+            -d $dir or die qq{Cannot open $dir: not a directory!\n};
+            opendir my $dh, $dir or die qq{Could not opendir "$dir": $!\n};
 
-        ## We need the modification time of the lastfile
-        my $lastfiletime = defined $lastfile ? -M $lastfile : 0;
+            ## We need the modification time of the lastfile
+            my $lastfiletime = defined $lastfile ? -M $lastfile : 0;
 
-        my %fileq;
-        while (my $file = readdir($dh)) {
-            my $fname = "$dir/$file";
-            my $modtime = -M $fname;
-            ## Skip if not a normal file
-            next if ! -f _;
-            if (length $prefix or length $postfix) {
-                next if $file !~ /\A\Q$prefix\E.*\Q$postfix\E\z/o;
+            my %fileq;
+            while (my $file = readdir($dh)) {
+                my $fname = "$dir/$file";
+                my $modtime = -M $fname;
+                ## Skip if not a normal file
+                next if ! -f _;
+                if (length $prefix or length $postfix) {
+                    next if $file !~ /\A\Q$prefix\E.*\Q$postfix\E\z/o;
+                }
+                ## Skip if it's older than the lastfile
+                next if $lastfiletime and $modtime > $lastfiletime;
+                $fileq{$modtime}{$fname} = 1;
             }
-            ## Skip if it's older than the lastfile
-            next if $lastfiletime and $modtime > $lastfiletime;
-            $fileq{$modtime}{$fname} = 1;
-        }
-        closedir $dh or warn qq{Could not closedir "$dir": $!\n};
-      TF: for my $time (sort { $a <=> $b } keys %fileq) {
-            for my $file (sort keys %{$fileq{$time}}) {
-                push @{$opt{$curr}{middle_filenames}} => $file;
-                ## If we don't have a lastfile, we simply use the most recent file
-                ## and throw away the rest
-                last TF if ! $lastfiletime;
+            closedir $dh or warn qq{Could not closedir "$dir": $!\n};
+
+          TF: for my $time (sort { $a <=> $b } keys %fileq) {
+                for my $file (sort keys %{$fileq{$time}}) {
+                    push @{$opt{middle_filenames}} => $file;
+                    ## If we don't have a lastfile, we simply use the most recent file
+                    ## and throw away the rest
+                    last TF if ! $lastfiletime;
+                }
             }
         }
 
-        return pop @{$opt{$curr}{middle_filenames}};
+        ## Return the next file, or undef when we run out
+        my $nextfile = pop @{ $opt{middle_filenames} };
+        ## If we are done, remove this temp hash
+        if (! defined $nextfile) {
+            delete $opt{middle_filenames};
+        }
+        return $nextfile;
 
     } ## end of LATEST time travel
 
     ## No lastfile makes it easy
-    exists $opt{$curr}{lastfile} or return $opt{$curr}{filename};
+    return $name if ! $lastfile;
 
     ## If we haven't processed the lastfile, do that one first
-    exists $find{$lastfile} or return $lastfile;
+    return $lastfile if ! exists $find{$lastfile};
 
-    ## If the last is the same as the current, return
-    $lastfile eq $opt{$curr}{filename} and return $lastfile;
+    ## If the last is the same as the current, return the name
+    return $name if $lastfile eq $name;
 
     ## We've processed the last file, are there any files in between the two?
     ## POSIX-based time travel
     if ($orig =~ /%/) {
 
-        ## Already have the list? Pop off items until we are done
-        if (exists $opt{$curr}{middle_filenames}) {
-            my $newfile = pop @{$opt{$curr}{middle_filenames}};
-            ## When we run out, return the current file
-            return $newfile || $opt{$curr}{filename};
-        }
+        ## Build the list if we don't have it yet
+        if (! exists $opt{middle_filenames}) {
 
-        ## We're going to walk backwards, 30 minutes at a time, and gather up
-        ## all files between "now" and the "last"
-        my $timerewind = 60*30; ## 30 minutes
-        my $maxloops = 24*2 * 7 * 30; ## max of 30 days
-        my $bail = 0;
-        my %seenfile;
-        my $lastchecked = '';
-        BACKINTIME: {
+            ## We're going to walk backwards, 30 minutes at a time, and gather up
+            ## all files between "now" and the "last"
+            my $timerewind = 60*30; ## 30 minutes
+            my $maxloops = 24*2 * 7 * 30; ## max of 30 days
+            my $bail = 0;
+            my %seenfile;
+            my $lastchecked = '';
+          BACKINTIME: {
 
-            my @ltime = localtime(time - $timerewind);
-            my $newfile = strftime($orig, @ltime);
-            if ($newfile ne $lastchecked) {
-                last if $newfile eq $lastfile;
-                $arg{debug} and warn "Checking for file $newfile (last was $lastfile)\n";
-                if (! exists $seenfile{$newfile}) {
-                    $seenfile{$newfile} = 1;
-                    push @{$opt{$curr}{middle_filenames}} => $newfile;
+                my @ltime = localtime(time - $timerewind);
+                my $newfile = strftime($orig, @ltime);
+                if ($newfile ne $lastchecked) {
+                    last if $newfile eq $lastfile;
+                    $arg{debug} and warn "Checking for file $newfile (last was $lastfile)\n";
+                    if (! exists $seenfile{$newfile}) {
+                        $seenfile{$newfile} = 1;
+                        push @{$opt{middle_filenames}} => $newfile;
+                    }
+                    $lastchecked = $newfile;
                 }
-                $lastchecked = $newfile;
+
+                $timerewind += 60*30;
+                ++$bail > $maxloops and die "Too many loops ($bail): bailing\n";
+                redo;
             }
 
-            $timerewind += 60*30;
-            ++$bail > $maxloops and die "Too many loops ($bail): bailing\n";
-            redo;
         }
 
-        return (keys %seenfile) ? (pop @{$opt{$curr}{middle_filenames}}) : $opt{$curr}{filename};
+        ## If the above loop found nothing, return the current name
+        if (! exists $opt{middle_filenames}) {
+            return $name;
+        }
+
+        ## Otherwise, pull it off the list until there is nothing left
+        my $nextfile = pop @{ $opt{middle_filenames} };
+        ## If we are done, remove this temp hash
+        if (! defined $nextfile) {
+            delete $opt{middle_filenames};
+        }
+        return $nextfile;
     }
 
     ## Just return the current file
-    return $opt{$curr}{filename};
+    return $name;
 
 } ## end of pick_log_file
 
@@ -520,9 +562,9 @@ sub parse_rc_files {
         open my $rc, '<', $file or die qq{Could not open "$file": $!\n};
         while (<$rc>) {
             next if /^\s*#/;
-            next if ! /^\s*(\w+)\s*[=:]\s*(.+?)\s*$/o;
+            next if ! /^\s*([\w\_\-]+)\s*[=:]\s*(.+?)\s*$/o;
             my ($name,$value) = (lc $1,$2);
-            $opt{$curr}{$name} = $value;
+            $opt{$name} = $value;
             $arg{$name} = $value;
             ## If we are disabled, simply exit quietly
             if ($name eq 'disable' and $value) {
@@ -581,7 +623,7 @@ sub parse_config_file {
         }
 
         ## A non-comment after one or comments allows us to map them to each other
-        if (@comment and m{^(\w+):}) {
+        if (@comment and m{^([\w\_\-]+):}) {
             chomp;
             for my $c (@comment) {
                 ## We store as both the keyword and the entire line
@@ -592,40 +634,65 @@ sub parse_config_file {
             undef @comment;
         }
 
-        ## What file are we checking on?
-        if (/^FILE:\s*(.+?)\s*$/) {
-            my $filename = $localopt{original_filename} = $1;
+        ## What file(s) are we checking on?
+        if (/^FILE(\d*):\s*(.+?)\s*$/) {
 
+            my $suffix = $1 || 0;
+            my $filename = $2;
+
+            ## Basic sanity check
             if ($filename !~ /\w/) {
-                die "No FILE found in the config file! (tried: $filename)\n";
+                die "No valid FILE found in the config file! (tried: $filename)\n";
             }
 
-            $filename = transform_filename($filename);
+            ## If files were specified on the command line, use those instead
+            if ($arg{file}[0]) {
 
-            ## If a custom file was specified, use that instead
-            if ($arg{file}) {
-                ## If it contains a path, use it directly
-                if ($arg{file} =~ m{/}) {
-                    $filename = $arg{file};
-                }
-                ## Otherwise, replace the current file name but keep the directory
-                else {
-                    my $dir = dirname($filename);
-                    $filename = "$dir/$arg{file}";
+                ## Have we been here already? Only need to override once
+                if (! exists  $localopt{filename}) {
+
+                    for my $argfile (@{ $arg{file} }) {
+
+                        ## If it contains a path, use it directly
+                        if ($argfile =~ m{/}) {
+                            $filename = $argfile;
+                        }
+                        ## Otherwise, replace the current file name but keep the directory
+                        else {
+                            my $dir = dirname($filename);
+                            $filename = "$dir/$argfile";
+                        }
+
+                        ## Add it to our local list both as final and original name
+                        push @{ $localopt{file} } => {
+                            name => $filename,
+                            original => $filename,
+                            commandline => 1,
+                            lastfile => '',
+                            offset => 0,
+                        };
+                    }
+
+                    next;
                 }
             }
 
-            ## Set some default values
-            $localopt{filename} = $filename;
-            $localopt{exclude} ||= [];
-            $localopt{include} ||= [];
-            $localopt{email}   ||= [];
+            ## If the file contains % escapes, replace with the actual time
+            my $newfilename = transform_filename($filename);
 
+            ## Save to the local list, storing the original filename for config rewriting
+            push @{ $localopt{file} } =>
+                {
+                 name => $newfilename,
+                 original => $filename,
+                 suffix => $suffix,
+                 };
         } ## end of FILE:
 
         ## The last filename we used
-        elsif (/^LASTFILE:\s*(.+?)\s*$/) {
-            $localopt{lastfile} = $1;
+        elsif (/^LASTFILE(\d*):\s*(.+?)\s*$/) {
+            my $suffix = $1 || 1;
+            $localopt{lastfile}{$suffix} = $2;
         }
         ## Who to send emails to for this file
         elsif (/^EMAIL:\s*(.+?)\s*$/) {
@@ -667,6 +734,10 @@ sub parse_config_file {
                 $arg{tempfile_limit} = $localopt{tempfile_limit} = $1;
             }
         }
+        ## Allow a very local log_line_prefix
+        elsif (/^LOG_LINE_PREFIX:\s*(.+)/) {
+            $arg{log_line_prefix} = $localopt{log_line_prefix} = $1;
+        }
         ## How to sort the output
         elsif (/^SORTBY:\s*(\w+)/) {
             $localopt{sortby} = $1;
@@ -683,19 +754,24 @@ sub parse_config_file {
         elsif (/^EXCLUDE:\s*(.+?)\s*$/) {
             push @{$localopt{exclude}}, $1;
         }
+        ## Which prefix lines to exclude from the report
+        elsif (/^EXCLUDE_PREFIX:\s*(.+?)\s*$/) {
+            push @{$localopt{exclude_prefix}}, $1;
+        }
         ## Which lines to include in the report
         elsif (/^INCLUDE:\s*(.+)/) {
             push @{$localopt{include}}, $1;
         }
-        ## The current offset into the file
-        elsif (/^OFFSET:\s*(\d+)/) {
-            $localopt{offset} = $1;
+        ## The current offset into a file
+        elsif (/^OFFSET(\d*):\s*(\d+)/) {
+            my $suffix = $1 || 1;
+            $localopt{offset}{$suffix} = $2;
         }
-        ## The custom maxsize for this file
+        ## The custom maxsize for all files
         elsif (/^MAXSIZE:\s*(\d+)/) {
             $localopt{maxsize} = $1;
         }
-        ## The subject line for this file
+        ## The subject line
         elsif (/^MAILSUBJECT:\s*(.+)/) { ## Trailing whitespace is significant here
             $localopt{mailsubject} = $1;
             $localopt{customsubject} = 1;
@@ -704,12 +780,58 @@ sub parse_config_file {
         elsif (/^MAILZERO:\s*(.+)/) {
             $localopt{mailzero} = $1;
         }
+        ## Allow (possibly multiple) mail signatures
+        elsif (/^MAILSIG:\s*(.+)/) {
+            push @{$localopt{mailsig}}, $1;
+            push @{$arg{mailsig}}, $1;
+        }
         ## Size at which we cutoff long statements
         elsif (/^STATEMENT_SIZE:\s*(.+)/) {
             $localopt{statement_size} = $1;
         }
     }
     close $c or die qq{Could not close "$configfile": $!\n};
+
+    ## Adjust the file suffixes as needed
+    ## This allows us to simply add multiple bare 'FILE:' entries before the first rewrite
+    ## We also plug in the LASTFILE AND OFFSET values now
+    my %numused;
+    for my $file (@{ $localopt{file} }) {
+        $file->{suffix} ||= 0;
+        next if ! $file->{suffix};
+        if ($numused{$file->{suffix}}++) {
+            die "The same FILE suffix ($file->{suffix}) was used more than once!\n";
+        }
+    }
+    for my $file (@{ $localopt{file} }) {
+
+        ## No need to change anything if we forced via the command line
+        next if $file->{commandline};
+
+        ## Only need to adjust 0s
+        if (! $file->{suffix}) {
+
+            ## Replace with the first free number
+            my $x = 1;
+            {
+                if (! $numused{$x}++) {
+                    $file->{suffix} = $x;
+                    last;
+                }
+                if ($x++ > 999) {
+                    die "Something went wrong: 999 iterations to find a FILE suffix!\n";
+                }
+                redo;
+            }
+        }
+
+        ## Put the lastfile into place if it exists
+        $file->{lastfile} = $localopt{lastfile}{$file->{suffix}} || '';
+
+        ## Put the offset into place if it exists
+        $file->{offset} = $localopt{offset}{$file->{suffix}} || 0;
+
+    }
 
     ## Move the local vars into place, also record that we found them here
     for my $k (keys %localopt) {
@@ -721,10 +843,13 @@ sub parse_config_file {
                 $opt{configfile}{"$k.$ik"} = 1;
             }
         }
-        $opt{$curr}{$k} = $localopt{$k};
+        $opt{$k} = $localopt{$k};
     }
+
     if ($arg{debug}) {
         local $Data::Dumper::Varname = 'opt';
+        warn Dumper \%opt;
+        local $Data::Dumper::Varname = 'arg';
         warn Dumper \%arg;
     }
 
@@ -737,7 +862,7 @@ sub parse_inherited_files {
 
     ## Call parse_inherit_file on each item in $opt{inherit}
 
-    for my $file (@{$opt{$curr}{inherit}}) {
+    for my $file (@{$opt{inherit}}) {
         parse_inherit_file($file);
     }
 
@@ -818,19 +943,23 @@ sub parse_inherit_file {
         }
         ## How to sort the output
         elsif (/^SORTBY:\s*(\w+)/) {
-            $opt{$curr}{sortby} = $1;
+            $opt{sortby} = $1;
         }
         ## Which lines to exclude from the report
         elsif (/^EXCLUDE:\s*(.+?)\s*$/) {
-            push @{$opt{$curr}{exclude}}, $1;
+            push @{$opt{exclude}}, $1;
+        }
+        ## Which prefix lines to exclude from the report
+        elsif (/^EXCLUDE_PREFIX:\s*(.+?)\s*$/) {
+            push @{$opt{exclude_prefix}}, $1;
         }
         ## Which lines to include in the report
         elsif (/^INCLUDE:\s*(.+)/) {
-            push @{$opt{$curr}{include}}, $1;
+            push @{$opt{include}}, $1;
         }
         ## Maximum file size
         elsif (/^MAXSIZE:\s*(\d+)/) {
-            $opt{$curr}{maxsize} = $1;
+            $opt{maxsize} = $1;
         }
         ## Exclude durations below this number
         elsif (/^DURATION:\s*(\d+)/) {
@@ -858,26 +987,42 @@ sub parse_inherit_file {
         }
         ## Who to send emails from
         elsif (/^FROM:\s*(.+?)\s*$/) {
-            $opt{$curr}{from} = $1;
+            $opt{from} = $1;
         }
         ## Who to send emails to for this file
         elsif (/^EMAIL:\s*(.+?)\s*$/) {
-            push @{$opt{$curr}{email}}, $1;
+            push @{$opt{email}}, $1;
         }
         ## Force mail to be sent - overrides any other setting
         elsif (/^MAILZERO:\s*(.+)/) {
-            $opt{$curr}{mailzero} = $1;
+            $opt{mailzero} = $1;
         }
         ## The file to use
-        elsif (/^FILE:\s*(.+)/) {
-            $opt{$curr}{original_filename} = $1;
-            $opt{$curr}{filename} = transform_filename($1);
-            $opt{$curr}{inherited_filename} = 1;
+        elsif (/^FILE(\d*):\s*(.+)/) {
+
+            my $suffix = $1 || 0;
+            my $filename = $2;
+
+            ## Skip entirely if we have a command-line file request
+            ## This is handled in the main config parsing
+            next if $arg{file}[0];
+
+            ## As with the normal config file, store a temp version
+            ## Save to the local list, storing the original filename for config rewriting
+            push @{ $opt{tempifile} } =>
+                {
+                 original => $filename,
+                 suffix => $suffix,
+                 };
         }
         ## The mail subject
         elsif (/^MAILSUBJECT:\s*(.+)/) {
-            $opt{$curr}{mailsubject} = $1;
-            $opt{$curr}{customsubject} = 1;
+            $opt{mailsubject} = $1;
+            $opt{customsubject} = 1;
+        }
+        ## The mail signature
+        elsif (/^MAILSIG:\s*(.+)/) {
+            push @{$opt{mailsig}}, $1;
         }
         ## The log line prefix
         elsif (/^LOG.LINE.PREFIX:\s*(.+)/o) {
@@ -885,7 +1030,7 @@ sub parse_inherit_file {
         }
         ## Size at which we cutoff long statements
         elsif (/^STATEMENT_SIZE:\s*(.+)/) {
-            $opt{$curr}{statement_size} = $1;
+            $opt{statement_size} = $1;
         }
         else {
             warn qq{Unknown item in include file "$file": $_\n};
@@ -894,6 +1039,51 @@ sub parse_inherit_file {
     }
     close $fh or warn qq{Could not close file "$file": $!\n};
 
+    ## Merge all the "FILE" entries and adjust suffixes
+    ## We allow overlap between the normal and inherited lists
+
+    if (exists $opt{tempifile}) {
+
+        my %numused;
+        for my $file (@{ $opt{tempifile} }) {
+            $file->{suffix} ||= 0;
+            next if ! $file->{suffix};
+            if ($numused{$file->{suffix}}++) {
+                die "The same FILE suffix ($file->{suffix}) was used more than once inside $filename!\n";
+            }
+        }
+
+        for my $file (@{ $opt{tempifile} }) {
+
+            ## Change zero to the first free number
+            if (! $file->{suffix}) {
+                my $x = 1;
+                {
+                    if (! $numused{$x}++) {
+                        $file->{suffix} = $x;
+                        last;
+                    }
+                    if ($x++ > 999) {
+                        die "Something went wrong: 999 iterations to find a FILE suffix inside $filename!\n";
+                    }
+                    redo;
+                }
+            }
+
+            ## Create our real entry
+            push @{ $opt{file} } =>
+                {
+                 name      => transform_filename($file->{original}),
+                 original  => $file->{original},
+                 suffix    => $file->{suffix},
+                 inherited => 1,
+                 };
+        }
+
+        ## Remove our temporary list
+        delete $opt{tempifile};
+    }
+
     return;
 
 } ## end of parse_inherited_file
@@ -901,10 +1091,24 @@ sub parse_inherit_file {
 
 sub parse_file {
 
-    ## Parse the passed in file
+    ## Parse a file - this is the workhorse
+    ## Arguments: two
+    ## 1. Exact filename we are parsing
+    ## 2. Hashref of file information:
+    ##   name: logfile to open
+    ##   original: original name
+    ##   lastfile: we scanned last time this ran. May be an empty string or not exist
+    ##   offset: where in the file we stopped at last time
     ## Returns the number of matches
 
     my $filename = shift;
+    my $fileinfo = shift;
+
+    ## The file we scanned last time we ran
+    my $lastfile = $fileinfo->{lastfile} || '';
+
+    ## Set this as the latest (but not the lastfile)
+    $fileinfo->{latest} = $filename;
 
     ## Touch the hash so we know we've been here
     $find{$filename} = {};
@@ -922,17 +1126,15 @@ sub parse_file {
     ## Figure out where in the file we want to start scanning from
     my $size = -s $filename;
     my $offset = 0;
-    my $maxsize = $opt{$curr}{maxsize} ? $opt{$curr}{maxsize} : $arg{maxsize};
+    my $maxsize = $opt{maxsize} ? $opt{maxsize} : $arg{maxsize};
 
     ## Is the offset significant?
-    ## Usually only is if the stored offset matches the current file
-
-    if (!$arg{file}
-        and (!exists $opt{$curr}{lastfile} or ($opt{$curr}{lastfile} eq $filename))
+    if (!$arg{file}[0]               ## ...not if we passed in filenames manually
+        and $lastfile eq $filename   ## ...not if this is not the same file we got the offset for last time
         ) {
         ## Allow the offset to equal the size via --reset
         if ($arg{reset}) {
-            $offset = $opt{$curr}{newoffset} = $size;
+            $offset = $size;
             $arg{verbose} and warn "  Resetting offset to $offset\n";
         }
         ## Allow the offset to be changed on the command line
@@ -945,8 +1147,8 @@ sub parse_file {
                 $offset = 0 if $offset < 0;
             }
         }
-        elsif (exists $opt{$curr}{offset}) {
-            $offset = $opt{$curr}{offset};
+        else{
+            $offset = $fileinfo->{offset} || 0;
         }
     }
 
@@ -962,7 +1164,14 @@ sub parse_file {
     }
 
     ## If the offset is equal to the size, we're done!
-    return 0 if $offset >= $size;
+    ## Store the offset if it is truly new and significant
+    if ($offset >= $size) {
+        $offset = $size;
+        if ($offset and $fileinfo->{offset} != $offset) {
+            $opt{newoffset}{$filename} = $offset;
+        }
+        return 0;
+    }
 
     ## Store the original offset
     my $original_offset = $offset;
@@ -1020,10 +1229,11 @@ sub parse_file {
             seek $fh, 0, $pos;
 
         } ## end pos > 1
+
     } ## end find_line_number
 
     ## Get exclusion and inclusion regexes for this file
-    ($exclude,$include) = generate_regexes($filename);
+    ($exclude,$include,$exclude_prefix) = generate_regexes($filename);
 
     ## Discard the previous line if needed (we rewound by 10 characters above)
     $original_offset and <$fh>;
@@ -1034,7 +1244,8 @@ sub parse_file {
     ## Needed to track postgres PIDs
     my %pidline;
 
-    if (lc $arg{pglog} eq 'csv') {
+    ## Switch to CSV mode if required of if the file ends in '.csv'
+    if (lc $arg{pglog} eq 'csv' or $filename =~ /\.csv$/) {
         if (! defined $csv) {
             eval {
                 require Text::CSV;
@@ -1068,17 +1279,37 @@ sub parse_file {
         my $pgnum = 1;
         my $lastline = '';
         my $syslognum = 0; ## used by syslog only
+        my $bailout = 0; ## emergency bail out in case we end up sleep seeking
       LOGLINE: while (<$fh>) {
+
+            ## We ran into a truncated line last time, so we are most likely done
+            last if $bailout;
+
             ## Easiest to just remove the newline here and now
-            chomp;
+            if (! chomp) {
+                ## There was no newline, so it's possible some other process is in
+                ## the middle of writing this line. Just in case this is so, sleep and
+                ## let it finish, then try again. Because we don't want to turn this
+                ## into a tail -f situation, bail out of the loop once done
+                sleep 1;
+                ## Rewind just far enough to try this line again
+                seek $fh, - (length $_), 1;
+                $_ = <$fh>;
+                if (! chomp) {
+                    ## Still no go! Let's just leave and abandon this line
+                    last LOGLINE;
+                }
+                ## Success! Finish up this line, but then abandon any further slurping
+                $bailout = 1;
+            }
             if ($arg{pgmode}) {
                 ## 1=prefix 2=timestamp 3=PID 4=rest
                 if ($_ =~ s/$pgpidre/$4/) {
 
-                    $pgprefix = $1;
-                    $pgprefix =~ s/\s+$//o;
                     ## We want the timestamp and the pid, even if we have to fake it
-                    ($pgts,$pgpid,$pgnum) = ($2||'',$3||1, 1);
+                    ($pgprefix,$pgts,$pgpid,$pgnum) = ($1, $2||'', $3||1, 1);
+
+                    $pgprefix =~ s/\s+$//o;
                     if ($arg{pglog} eq 'syslog') {
                         if ($pgprefix =~ /\[(\d+)\-\d+/) {
                             $pgnum = $1;
@@ -1114,6 +1345,11 @@ sub parse_file {
                         ## Increment our arbitrary internal number
                         $current_pid_num{$pgpid} ||= 0;
                         $pgnum = $current_pid_num{$pgpid} + 1;
+                    }
+
+                    ## Optionally strip out SQLSTATE codes
+                    if ($arg{sqlstate}) {
+                        $_ =~ s/^(?:FATAL|ERROR):  ([0-9A-Z]{5}): /ERROR:  /o;
                     }
 
                     ## Assign this string to the current pgnum slot
@@ -1184,7 +1420,10 @@ sub parse_file {
 
     ## Get the new offset and store it
     seek $fh, 0, 1;
-    $opt{$curr}{newoffset} = tell $fh;
+    $offset = tell $fh;
+    if ($fileinfo->{offset} != $offset and $offset) {
+        $opt{newoffset}{$filename} = $offset;
+    }
 
     close $fh or die qq{Could not close "$filename": $!\n};
 
@@ -1229,12 +1468,13 @@ sub generate_regexes {
 
     ## Currently, all files get the same regex, so we cache it
     if (exists $opt{globalexcluderegex}) {
-        return $opt{globalexcluderegex}, $opt{globalincluderegex};
+        return $opt{globalexcluderegex}, $opt{globalincluderegex}, $opt{globalexcludeprefixregex};
+
     }
 
     ## Build an exclusion regex
     my $lexclude = '';
-    for my $ex (@{$opt{$curr}{exclude}}) {
+    for my $ex (@{$opt{exclude}}) {
         $arg{debug} and warn "  Adding exclusion: $ex\n";
         my $regex = qr{$ex};
         $lexclude .= "$regex|";
@@ -1242,9 +1482,19 @@ sub generate_regexes {
     $lexclude =~ s/\|$//;
     $arg{verbose} and $lexclude and warn "  Exclusion: $lexclude\n";
 
+    ## Build a prefix exclusion regex
+    my $lexclude_prefix = '';
+    for my $ex (@{$opt{exclude_prefix}}) {
+        $arg{debug} and warn "  Adding exclusion_prefix: $ex\n";
+        my $regex = qr{$ex};
+        $lexclude_prefix .= "$regex|";
+    }
+    $lexclude_prefix =~ s/\|$//;
+    $arg{verbose} and $lexclude_prefix and warn "  Exclusion_prefix: $lexclude_prefix\n";
+
     ## Build an inclusion regex
     my $linclude = '';
-    for my $in (@{$opt{$curr}{include}}) {
+    for my $in (@{$opt{include}}) {
         $arg{debug} and warn "  Adding inclusion: $in\n";
         my $regex = qr{$in};
         $linclude .= "$regex|";
@@ -1253,9 +1503,10 @@ sub generate_regexes {
     $arg{verbose} and $linclude and warn "  Inclusion: $linclude\n";
 
     $opt{globalexcluderegex} = $lexclude;
+    $opt{globalexcludeprefixregex} = $lexclude_prefix;
     $opt{globalincluderegex} = $linclude;
 
-    return $lexclude, $linclude;
+    return $lexclude, $linclude, $lexclude_prefix;
 
 } ## end of generate_regexes
 
@@ -1312,16 +1563,14 @@ sub process_line {
 
         ## Bail if it matches the exclusion regex
         return 0 if $exclude and $string =~ $exclude;
+
+        ## Bail if it matches the prefix exclusion regex
+        return 0 if $exclude_prefix and $pgprefix =~ $exclude_prefix;
     }
 
     ## If in duration mode, and we have a minimum cutoff, discard faster ones
     if ($arg{type} eq 'duration' and $arg{duration} >= 0) {
         return 0 if ($string =~ / duration: (\d+)/o and $1 < $arg{duration});
-    }
-
-    ## If in tempfile mode, and we have a minimum cutoff, discard smaller ones
-    if ($arg{type} eq 'tempfile' and $arg{tempfile} >= 0) {
-        #return 0 if ($string =~ / temporary file:.+?size (\d+)/o and $1 < $arg{tempfile});
     }
 
     $arg{debug} and warn "MATCH at line $line of $filename\n";
@@ -1379,7 +1628,7 @@ sub process_line {
             "$select" . (join ',' => @arg) . ')';
         }geix;
 
-        my $thisletter;
+        my $thisletter = '';
 
         $string =~ s{(VALUES|REPLACE)\s*\((.+)\)}{ ## For emacs: ()()()
             my ($sword,$list) = ($1,$2);
@@ -1716,10 +1965,10 @@ sub process_report {
     $last_file_parsed = $files_parsed[-1]->[0] if ! defined $last_file_parsed;
 
     ## Subject with replaced keywords:
-    my $subject = $opt{$curr}{mailsubject} || $DEFAULT_SUBJECT;
+    my $subject = $opt{mailsubject} || $DEFAULT_SUBJECT;
     $subject =~ s/FILE/$last_file_parsed/g;
     $subject =~ s/HOST/$hostname/g;
-    if ($arg{tsepnosub} or $opt{$curr}{tsepnosub}) {
+    if ($arg{tsepnosub} or $opt{tsepnosub}) {
         $subject =~ s/NUMBER/$grand_total/g;
         $subject =~ s/UNIQUE/$unique_matches/g;
     }
@@ -1739,24 +1988,24 @@ sub process_report {
     push @header => "X-TNM-VERSION: $VERSION";
 
     ## Allow no specific email for dryruns
-    if (! @{$opt{$curr}{email}}) {
+    if (! exists $opt{email} or ! @{$opt{email}}) {
         if ($arg{dryrun} or $arg{nomail}) {
-            push @{$opt{$curr}{email}} => 'dryrun@example.com';
+            push @{$opt{email}} => 'dryrun@example.com'; ## no critic (RequireInterpolationOfMetachars)
         }
     }
 
     ## Fill out the "To:" fields
-    for my $email (@{$opt{$curr}{email}}) {
+    for my $email (@{$opt{email}}) {
         push @header => "To: $email";
     }
-    if (! @{$opt{$curr}{email}}) {
+    if (! @{$opt{email}}) {
         die "Cannot send email without knowing who to send to!\n";
     }
 
-    my $mailcom = $opt{$curr}{mailcom} || $arg{mailcom};
+    my $mailcom = $opt{mailcom} || $arg{mailcom};
 
     ## Custom From:
-    my $from_addr = $opt{$curr}{from} || '';
+    my $from_addr = $opt{from} || '';
     if ($from_addr ne '') {
         push @header => "From: $from_addr";
         $mailcom .= " -f $from_addr";
@@ -1787,11 +2036,13 @@ sub process_report {
         my $letter = 0;
         push @msg => "Total matches: $pretty_grand_total";
         my $maxcount = 1;
+        my $maxname = 1;
         my $maxletter = 1;
         for my $file (@files_parsed) {
             next if ! $file->[1];
             $file->[1] = pretty_number($file->[1]);
             $maxcount = length $file->[1] if length $file->[1] > $maxcount;
+            $maxname = length $file->[0] if length $file->[0] > $maxname;
             my $name = chr(65+$letter);
             if ($letter >= 26) {
                 $name = sprintf '%s%s',
@@ -1804,10 +2055,11 @@ sub process_report {
         for my $file (@files_parsed) {
             next if ! $file->[1];
             my $name = $fab{$file->[0]};
-            push @msg => sprintf 'Matches from %-*s %s: %*s',
+            push @msg => sprintf 'Matches from %-*s %-*s %*s',
                 $maxletter + 2,
                 "[$name]",
-                $file->[0],
+                $maxname+1,
+                "$file->[0]:",
                 $maxcount,
                 $file->[1];
         }
@@ -1844,7 +2096,7 @@ sub process_report {
         $arg{verbose} and print qq{File $bigfile too big ($filesize > $arg{maxemailsize})\n};
     }
 
-    my $emails = join ' ' => @{$opt{$curr}{email}};
+    my $emails = join ' ' => @{$opt{email}};
 
     ## Sanity check on number of loops below
     my $safety = 1;
@@ -1937,6 +2189,13 @@ sub process_report {
             next if ! $stop_point;
             last if tell $bigfh >= $stop_point;
         }
+
+        ## If we have a signature, add it
+        if ($arg{mailsignature}) {
+            ## Caller's responsibility to add a "--" line
+            print {$efh} $arg{mailsignature};
+        }
+
         close $efh or warn qq{Could not close $emailfile: $!\n};
 
         $arg{verbose} and warn "  Sending mail to: $emails\n";
@@ -1945,7 +2204,7 @@ sub process_report {
             $arg{quiet} or warn "  DRYRUN: $COM\n";
         }
         else {
-            my $mailmode = $opt{$curr}{mailmode} || $arg{mailmode};
+            my $mailmode = $opt{mailmode} || $arg{mailmode};
             if ($arg{mailmode} eq 'sendmail') {
                 system $COM;
             }
@@ -2007,19 +2266,19 @@ sub send_smtp_email {
     require Net::SMTP::SSL;
 
     ## Absorb any values set by rc files, and sanity check things
-    my $mailserver = $opt{$curr}{mailserver} || $arg{mailserver};
+    my $mailserver = $opt{mailserver} || $arg{mailserver};
     if ($mailserver eq 'example.com') {
         die qq{When using smtp mode, you must specify a mailserver!\n};
     }
-    my $mailuser = $opt{$curr}{mailuser} || $arg{mailuser};
+    my $mailuser = $opt{mailuser} || $arg{mailuser};
     if ($mailuser eq 'example') {
         die qq{When using smtp mode, you must specify a mailuser!\n};
     }
-    my $mailpass = $opt{$curr}{mailpass} || $arg{mailpass};
+    my $mailpass = $opt{mailpass} || $arg{mailpass};
     if ($mailpass eq 'example') {
         die qq{When using smtp mode, you must specify a mailpass!\n};
     }
-    my $mailport = $opt{$curr}{mailport} || $arg{mailport};
+    my $mailport = $opt{mailport} || $arg{mailport};
 
     ## Attempt to connect to the server
     my $smtp;
@@ -2068,7 +2327,7 @@ sub lines_of_interest {
 
     sub sortsub { ## no critic (ProhibitNestedSubs)
 
-        my $sorttype = $opt{$curr}{sortby} || $arg{sortby};
+        my $sorttype = $opt{sortby} || $arg{sortby};
 
         if ($arg{type} eq 'duration') {
             if (! exists $sorthelp{$a}) {
@@ -2155,7 +2414,7 @@ sub lines_of_interest {
         for my $f (sort sortsub @sorted) {
             $meancount++;
             my $item = sprintf '(item %d, count is %d)', $f->{displaycount}, $f->{count};
-            push @mean => sprintf "%10s %-22s", pretty_size($f->{mean},1), $item;
+            push @mean => sprintf '%10s %-22s', pretty_size($f->{mean},1), $item;
             $maxmean = $f->{displaycount} if $f->{displaycount} > $maxmean;
             last if $arg{tempfile_limit} and $meancount >= $arg{tempfile_limit};
         }
@@ -2168,7 +2427,7 @@ sub lines_of_interest {
         for my $f (sort sortsub @sorted) {
             $totalcount++;
             my $item = sprintf '(item %d, count is %d)', $f->{displaycount}, $f->{count};
-            push @totaltemp => sprintf "%10s %-22s", pretty_size($f->{total},1), $item;
+            push @totaltemp => sprintf '%10s %-22s', pretty_size($f->{total},1), $item;
             $maxtotal = $f->{displaycount} if $f->{displaycount} > $maxtotal;
             last if $arg{tempfile_limit} and $totalcount >= $arg{tempfile_limit};
         }
@@ -2180,7 +2439,7 @@ sub lines_of_interest {
         $count = 0;
         {
             last if ! defined $mean[$count] and ! defined $totaltemp[$count];
-            printf "%-s |", defined $mean[$count] ? $mean[$count] : '';
+            printf '%-s |', defined $mean[$count] ? $mean[$count] : '';
             printf "%s\n", defined $totaltemp[$count] ? $totaltemp[$count] : '';
             $count++;
             redo;
@@ -2372,8 +2631,8 @@ sub wrapline {
     my $len = length $line;
     my $olen = $len;
     my $waschopped = 0;
-    my $maxsize = defined $opt{$curr}{statement_size}
-        ? $opt{$curr}{statement_size}
+    my $maxsize = defined $opt{statement_size}
+        ? $opt{statement_size}
         : $arg{statement_size};
 
     if ($maxsize and $len > $maxsize) {
@@ -2400,81 +2659,115 @@ sub final_cleanup {
 
     $arg{debug} and warn "  Performing final cleanup\n";
 
-    ## If offset has changed, save it
-    my $newoffset = 0;
-    if (exists $opt{$curr}{newoffset}) {
-        $changes++;
-        $newoffset = $opt{$curr}{newoffset};
-        $arg{verbose} and warn "  Setting offset to $newoffset\n";
+    ## Need to walk through and see if anything has changed so we can rewrite the config
+    ## For the moment, that only means the offset and the lastfile
+
+    ## Have we got new lastfiles or offsets?
+    for my $t (@{ $opt{file} }) {
+        if ($t->{latest} ne $t->{lastfile}) {
+            $changes++;
+            $t->{lastfile} = delete $t->{latest};
+        }
+        if (exists $opt{newoffset}{$t->{lastfile}}) {
+            my $newoffset = $opt{newoffset}{$t->{lastfile}};
+            if ($t->{offset} != $newoffset) {
+                $changes++;
+                $t->{offset} = $newoffset;
+            }
+        }
     }
 
-    ## Reset always rewrites the file, even in dryrun mode
-    if (($changes and !$arg{dryrun}) or $arg{reset}) {
-        $arg{verbose} and warn "  Saving new config file (changes=$changes)\n";
-        open my $fh, '>', $configfile or die qq{Could not write "$configfile": $!\n};
-        my $oldselect = select $fh;
-        my $now = localtime;
-        print qq{## Config file for the tail_n_mail program
+    ## No rewriting if in dryrun mode, but reset always trumps dryrun
+    ## Otherwise, do nothing if there have been no changes
+    return if (!$changes or $arg{dryrun}) and !$arg{reset};
+
+    $arg{verbose} and warn "  Saving new config file\n";
+    open my $fh, '>', $configfile or die qq{Could not write "$configfile": $!\n};
+    my $oldselect = select $fh;
+    my $now = localtime;
+    print qq{## Config file for the tail_n_mail program
 ## This file is automatically updated
 ## Last updated: $now
 };
 
-        for my $item (qw/ email from type duration tempfile find_line_number sortby duration_limit tempfile_limit/) {
-            next if ! exists $opt{$curr}{$item};
+    for my $item (qw/ log_line_prefix email from type mailsig duration tempfile find_line_number sortby duration_limit tempfile_limit/) {
+        next if ! exists $opt{$item};
 
-            next if $item eq 'duration' and $arg{duration} < 0;
-            next if $item eq 'duration_limit' and ! $arg{duration_limit};
+        next if $item eq 'duration' and $arg{duration} < 0;
+        next if $item eq 'duration_limit' and ! $arg{duration_limit};
 
-            next if $item eq 'tempfile' and $arg{tempfile} < 0;
-            next if $item eq 'tempfile_limit' and ! $arg{tempfile_limit};
+        next if $item eq 'tempfile' and $arg{tempfile} < 0;
+        next if $item eq 'tempfile_limit' and ! $arg{tempfile_limit};
 
-            ## Only rewrite if it came from this config file, not tailnmailrc or command line
-            next if ! exists $opt{configfile}{$item};
-            add_comments(uc $item);
-            if (ref $opt{$curr}{$item} eq 'ARRAY') {
-                for my $itemz (@{$opt{$curr}{$item}}) {
-                    next if ! exists $opt{configfile}{"$item.$itemz"};
-                    printf "%s: %s\n", uc $item, $itemz;
-                }
-            }
-            else {
-                printf "%s: %s\n", uc $item, $opt{$curr}{$item};
+        ## Only rewrite if it came from this config file, not tailnmailrc or command line
+        next if ! exists $opt{configfile}{$item};
+        add_comments(uc $item);
+        if (ref $opt{$item} eq 'ARRAY') {
+            for my $itemz (@{$opt{$item}}) {
+                next if ! exists $opt{configfile}{"$item.$itemz"};
+                printf "%s: %s\n", uc $item, $itemz;
             }
         }
-        if ($opt{configfile}{maxsize}) {
-            print "MAXSIZE: $opt{$curr}{maxsize}\n";
+        else {
+            printf "%s: %s\n", uc $item, $opt{$item};
         }
-        if ($opt{$curr}{customsubject}) {
-            add_comments('MAILSUBJECT');
-            print "MAILSUBJECT: $opt{$curr}{mailsubject}\n";
-        }
-
-        print "\n";
-        add_comments('FILE');
-        if (! $opt{$curr}{inherited_filename}) {
-            print "FILE: $opt{$curr}{original_filename}\n";
-        }
-        print "LASTFILE: $opt{$curr}{filename}\n";
-        print "OFFSET: $newoffset\n";
-        for my $inherit (@{$opt{$curr}{inherit}}) {
-            add_comments("INHERIT: $inherit");
-            print "INHERIT: $inherit\n";
-        }
-        for my $include (@{$opt{$curr}{include}}) {
-            next if ! exists $opt{configfile}{"include.$include"};
-            add_comments("INCLUDE: $include");
-            print "INCLUDE: $include\n";
-        }
-        for my $exclude (@{$opt{$curr}{exclude}}) {
-            next if ! exists $opt{configfile}{"exclude.$exclude"};
-            add_comments("EXCLUDE: $exclude");
-            print "EXCLUDE: $exclude\n";
-        }
-        print "\n";
-
-        select $oldselect;
-        close $fh or die qq{Could not close "$configfile": $!\n};
     }
+
+    if ($opt{configfile}{maxsize}) {
+        print "MAXSIZE: $opt{maxsize}\n";
+    }
+    if ($opt{customsubject}) {
+        add_comments('MAILSUBJECT');
+        print "MAILSUBJECT: $opt{mailsubject}\n";
+    }
+
+    print "\n";
+    for my $inherit (@{$opt{inherit}}) {
+        add_comments("INHERIT: $inherit");
+        print "INHERIT: $inherit\n";
+    }
+    for my $include (@{$opt{include}}) {
+        next if ! exists $opt{configfile}{"include.$include"};
+        add_comments("INCLUDE: $include");
+        print "INCLUDE: $include\n";
+    }
+    for my $exclude (@{$opt{exclude}}) {
+        next if ! exists $opt{configfile}{"exclude.$exclude"};
+        add_comments("EXCLUDE: $exclude");
+        print "EXCLUDE: $exclude\n";
+    }
+    for my $exclude_prefix (@{$opt{exclude_prefix}}) {
+        next if ! exists $opt{configfile}{"exclude_prefix.$exclude_prefix"};
+        add_comments("EXCLUDE_PREFIX: $exclude_prefix");
+        print "EXCLUDE_PREFIX: $exclude_prefix\n";
+    }
+
+    print "\n";
+    add_comments('FILE');
+    for my $f (sort { $a->{suffix} <=> $b->{suffix} }
+               @{ $opt{file} }) {
+
+        ## Skip inherited files
+        next if exists $f->{inherited};
+
+        printf "\nFILE%d: %s\n", $f->{suffix}, $f->{original};
+
+        ## Got any lastfile or offset for these?
+        if ($f->{lastfile}) {
+            printf "LASTFILE%d: %s\n", $f->{suffix}, $f->{lastfile};
+        }
+        ## The offset may be new, or we may be the same as last time
+        if (exists $opt{newoffset}{$f->{lastfile}}) {
+            printf "OFFSET%d: %d\n", $f->{suffix}, $opt{newoffset}{$f->{lastfile}};
+        }
+        elsif ($f->{offset}) {
+            printf "OFFSET%d: %d\n", $f->{suffix}, $f->{offset};
+        }
+    }
+    print "\n";
+
+    select $oldselect;
+    close $fh or die qq{Could not close "$configfile": $!\n};
 
     return;
 
