@@ -5,9 +5,6 @@
 HOSTNAME="hostname.domain"
 BACKUPCONF="/home/postgres/etc/zbackup2.conf"
 LOCKFILEPATH="/var/tmp"
-#BACULACMD=/opt/bacula/sbin/bconsole
-#BLOG=/var/bacula/log
-#INCDUMPDIR=/var/tmp
 PSQLCMD="/opt/pgsql/bin/psql"
 ZFSCMD="/usr/sbin/zfs"
 SSHCMD="/usr/bin/ssh"
@@ -23,26 +20,16 @@ PGPORT="5432"
 
 ## DO NOT EDIT BELOW THIS LINE ##
 
-RUN=true
-DEBUG=true
 SERIAL=$(date +%Y%m%d%H%M%S)
-
-debug_run() {
-    ${DEBUG} && echo "$@"
-    ${RUN} && "$@"
-}
 
 usage() {
     cat <<EOF
-$0: [-odfin] [-p <port_number>] [-z <target>] [-b <job>] [-t <path>] [-l <label>] [-c <conf_file>]
+$0: [-ofi] [-p <port_number>] [-z <target>] [-t <path>] [-l <label>] [-c <conf_file>]
         -o              specify offline mode otherwise online
-        -d              just describe the process (don't do it).
         -f              force a backup even if one is running.
         -i              perform only an incremental if possible
-        -n              use Netbackup
         -p <port>       port which database runs on (default 5432)
         -z <target>     use zfs send. using <target>
-        -b <job>        use bacula. using job=<job>
         -t <path>       use tar. create file in <path>
         -l <label>      backup using label: <label>
         -c <conf_file>  use alternate config file path
@@ -52,14 +39,11 @@ EOF
 }
 
 read_params() {
-    while getopts 'odfinp:z:b:t:l:' opt "$@"
+    while getopts 'ofip:z:t:l:' opt "$@"
     do
         case "$opt" in
             o)
                 OFFLINE="yes"
-                ;;
-            d)
-                RUN=false
                 ;;
             f)
                 FORCE="yes"
@@ -67,17 +51,11 @@ read_params() {
             i)
                 INCREMENTAL="yes"
                 ;;
-            n)
-                NETBACKUP="yes"
-                ;;
             p)
                 PGPORT="${OPTARG}"
                 ;;
             z)
                 ZFSSENDTARGET="${OPTARG}"
-                ;;
-            b)
-                BACULAJOB="${OPTARG}"
                 ;;
             t)
                 TARPATH="${OPTARG}"
@@ -120,7 +98,7 @@ sanity_check() {
         echo "backup in progress (${LOCKFILE} exists)."
         exit
     else
-        ${RUN} && touch ${LOCKFILE}
+        touch ${LOCKFILE}
     fi
 
     if [[ -z ${NETBACKUP} ]] && [[ -z ${ZFSSENDTARGET} ]] && [[ -z ${BACULAJOB} ]] && [[ -z ${TARPATH} ]]
@@ -133,21 +111,21 @@ sanity_check() {
 
 postgres_start_backup() {
     echo "starting postgres backup on label ${BACKUPLABEL}_${SERIAL}"
-    debug_run su - postgres -c "${PSQLCMD} -c \"CHECKPOINT;\""
-    debug_run su - postgres -c "${PSQLCMD} -c \"SELECT pg_start_backup('${BACKUPLABEL}_${SERIAL}');\""
+    su - postgres -c "${PSQLCMD} -c \"CHECKPOINT;\""
+    su - postgres -c "${PSQLCMD} -c \"SELECT pg_start_backup('${BACKUPLABEL}_${SERIAL}');\""
 }
 
 postgres_stop_backup() {
     echo "stopping postgres backup on label ${BACKUPLABEL}_${SERIAL}"
-    debug_run su - postgres -c "${PSQLCMD} -c \"SELECT pg_stop_backup();\""
+    su - postgres -c "${PSQLCMD} -c \"SELECT pg_stop_backup();\""
 }
 
 zfs_snap() {
     while read -r dset
     do
         [[ ${dset} = \#* ]] && continue
-        debug_run ${ZFSCMD} snapshot ${dset}@${BACKUPLABEL}_${SERIAL}
-        debug_run ${ZFSCMD} hold zbackup ${dset}@${BACKUPLABEL}_${SERIAL}
+        ${ZFSCMD} snapshot ${dset}@${BACKUPLABEL}_${SERIAL}
+        ${ZFSCMD} hold zbackup ${dset}@${BACKUPLABEL}_${SERIAL}
     done < "${BACKUPCONF}"
 }
 
@@ -165,25 +143,15 @@ zfs_send() {
 
     if [[ -n ${OLDSNAP} ]]
     then
-        DESTFILE=${1/\//\.}.incr.zfs
-        debug_run ${ZFSCMD} send -i ${OLDSNAP} $1 | ${COMPRESSCMD} | ${SSHCMD} ${ZFSSENDTARGET} "${TEECMD} ${OFFSITEDIR}/${DESTFILE}${EXT} | ${DECOMPRESSCMD} | ${ZSTREAMDUMPCMD}"
+        DESTFILE=${1//\//\.}.incr.zfs
+        ${ZFSCMD} send -i ${OLDSNAP} $1 | ${COMPRESSCMD} | ${SSHCMD} ${ZFSSENDTARGET} "${TEECMD} ${OFFSITEDIR}/${DESTFILE}${EXT} | ${DECOMPRESSCMD} | ${ZSTREAMDUMPCMD}"
     fi
 
     if [[ -z ${INCREMENTAL} ]] || [[ -z ${OLDSNAP} ]]
     then
-        DESTFILE=${1/\//\.}.full.zfs
-        debug_run ${ZFSCMD} send $1 | ${COMPRESSCMD} | ${SSHCMD} ${ZFSSENDTARGET} "${TEECMD} ${OFFSITEDIR}/${DESTFILE}${EXT} | ${DECOMPRESSCMD} | ${ZSTREAMDUMPCMD}"
+        DESTFILE=${1//\//\.}.full.zfs
+        ${ZFSCMD} send $1 | ${COMPRESSCMD} | ${SSHCMD} ${ZFSSENDTARGET} "${TEECMD} ${OFFSITEDIR}/${DESTFILE}${EXT} | ${DECOMPRESSCMD} | ${ZSTREAMDUMPCMD}"
     fi
-}
-
-netbackup() {
-    echo "netbackup not implemented"
-    sleep 1
-}
-
-bacula() {
-    echo "bacula not implemented"
-    sleep 1
 }
 
 backup() {
@@ -191,26 +159,14 @@ backup() {
     do
         if [[ ${ZFSSENDTARGET} ]]
         then
-            zfs_send ${snap} &
-        fi
-
-        if [[ ${NETBACKUP} ]]
-        then
-            netbackup ${snap} &
-        fi
-
-        if [[ ${BACULAJOB} ]]
-        then
-            bacula ${snap} &
+            zfs_send ${snap}
         fi
 
         if [[ ${TARPATH} ]]
         then
-            tar_filesystem ${snap} &
+            tar_filesystem ${snap}
         fi
     done
-
-    wait
 }
 
 zfs_clear_snaps() {
@@ -219,8 +175,8 @@ zfs_clear_snaps() {
         [[ ${dset} = \#* ]] && continue
         ${ZFSCMD} list -H -t snapshot -o name | grep "^${dset}@${BACKUPLABEL}_" | grep -v "${SERIAL}$" | while read -r snap
         do
-            debug_run ${ZFSCMD} release zbackup ${snap}
-            debug_run ${ZFSCMD} destroy ${snap}
+            ${ZFSCMD} release zbackup ${snap}
+            ${ZFSCMD} destroy ${snap}
         done
     done < "${BACKUPCONF}"
 }
@@ -239,4 +195,4 @@ fi
 
 backup
 zfs_clear_snaps
-${RUN} && rm ${LOCKFILE}
+rm ${LOCKFILE}
