@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# function definitions #
+
+setup() {
+    pg_mirror="http://ftp.postgresql.org/pub/source"
+    destination="/opt/pgbrew"
+    http_fetcher="$( pick_first_existing wget curl )"
+    make_program="$( pick_first_existing gmake make )"
+    if [[ $( uname -s ) == "SunOS" ]]
+    then
+        export CC="cc -Xa"
+        export CPPFLAGS="-I/opt/omni/include/libxml2 -I/opt/omni/include -I/opt/omni/include/libxml2 -I/usr/sfw/include"
+        export CFLAGS="-xO3 -m64 -g"
+        export CFLAGS_SL="-KPIC"
+        export LDFLAGS="-m64 -L/opt/omni/lib/amd64 -R/opt/omni/lib/amd64 -L/usr/sfw/lib/amd64 -R/usr/sfw/lib/amd64 -Wl,-R'/opt/pgsql911/lib'"
+        export LIBS="-lxml2 -lssl -lcrypto -lz -lreadline -ltermcap -lnsl -lrt -lsocket -lm"
+        special_configure_options=( '--enable-dtrace' 'DTRACEFLAGS=-64' 'CC=cc' 'CFLAGS=-xO3 -m64' "LDFLAGS=$LDFLAGS" "CPPFLAGS=$CPPFLAGS" )
+        export PATH="/sbin:/usr/sbin:/usr/local/sbin:/usr/gnu/bin:/opt/omni/bin:/opt/OMNIperl/bin:/usr/openwin/bin:/usr/perl5/5.8.4/bin:/usr/X11/bin:/usr/dt/bin:/usr/sfw/bin:/usr/ccs/bin:/usr/xpg4/bin:/usr/xpg6/bin:/usr/proc/bin:/usr/SUNWale/bin:/usr/sadm/sysadm/bin:/usr/sadm/bin:/usr/sadm/install/bin:/usr/local/bin:/usr/bin:/bin"
+    fi
+}
+
+pick_first_existing() {
+    for cmd in "$@"
+    do
+        if type -f -p "$cmd" &>/dev/null
+        then
+            echo "$cmd"
+            return
+        fi
+    done
+
+    printf "There is none of:\n" >&2
+    printf "  - %s\n" "$@" >&2
+    exit
+}
+
+http_get() {
+    url="$1"
+    echo "+ Getting $url" >&2
+    if [[ "$http_fetcher" == "wget" ]]
+    then
+        wget -O - -q "$url"
+    else
+        curl -s -L "$url"
+    fi
+}
+
+get_available_versions() {
+    pg_versions=( $(
+        http_get http://www.postgresql.org/ftp/source/ | \
+        perl -pe 's/</\n</g' | \
+        perl -ne 'print if /^<a href="(v[0-9]+\.[0-9]+\.[0-9]+)">\1$/' | \
+        cut -d\> -f2 |
+        cut -b2-
+        ) )
+}
+
+get_newer_version() {
+    v1="$1"
+    v2="$2"
+    IFS=. read -ra v1_a <<<"${v1#v}"
+    IFS=. read -ra v2_a <<<"${v2#v}"
+    for i in {0..2}
+    do
+        if (( ${v1_a[$i]} < ${v2_a[$i]} ))
+        then
+            echo $v2
+            return
+        elif (( ${v1_a[$i]} > ${v2_a[$i]} ))
+        then
+            echo $v1
+            return
+        fi
+    done
+    echo $v1
+}
+
+get_port() {
+    IFS=. read -ra ver <<<"$chosen_version"
+    printf "%d" $(( 5000 + ${ver[0]} * 100 + ${ver[1]} * 10 ))
+}
+
+choose_version() {
+    echo "Available versions:"
+    printf "  - %s\n" "${pg_versions[@]}"
+    read -p "Which one to build? You can specify prefix only to get newest version with this prefix: " -r picked_version
+
+    if [[ "${picked_version: -1}" == "." ]]
+    then
+        picked_version="${picked_version:0:-1}"
+    fi
+
+    prefix_length=$(( 1 + ${#picked_version} ))
+    prefix="${picked_version}."
+
+    chosen_version=
+    for v in "${pg_versions[@]}"
+    do
+        if [[ $v == $picked_version ]]
+        then
+            chosen_version="$picked_version"
+            return
+        fi
+        if [[ $prefix == "${v:0:$prefix_length}" ]]
+        then
+            if [[ "$chosen_version" == "" ]]
+            then
+                chosen_version="$v"
+            else
+                chosen_version="$( get_newer_version "$chosen_version" "$v" )"
+            fi
+        fi
+    done
+    chosen_version="${chosen_version#v}"
+    if [[ "$chosen_version" == "" ]]
+    then
+        echo "Couldn't find requested version?!" >&2
+        exit
+    fi
+    echo "Chosen version = $chosen_version"
+    prefix="${destination}/${chosen_version}"
+}
+
+get_sources() {
+    http_get "${pg_mirror}/v${chosen_version}/postgresql-${chosen_version}.tar.bz2" | bzip2 -dc - | tar -xf -
+    mv "postgresql-${chosen_version}" source
+}
+
+patch_sources() {
+    perl -pi -e "
+        s/\A \s* (?: [#] \s* )? listen_addresses \s* = \s* '.*?'/listen_addresses = '*'/x;
+        s/\A \s* (?: [#] \s* )? log_destination s* = \s* '.*?'/log_destination = 'stderr'/x;
+        s/\A \s* (?: [#] \s* )? (log_min_duration_statement|log_temp_files|log_autovacuum_min_duration) \s* = \s* -?\d+/\1 = 0/x;
+        s/\A \s* (?: [#] \s* )? log_line_prefix \s* = \s* '.*?'/log_line_prefix = '%t \[%r\] \[%p\]: \[%l-1\] user=%u,db=%d,e=%e: '/x;
+        s/\A \s* (?: [#] \s* )? (logging_collector|log_checkpoints|log_connections|log_disconnections|log_lock_waits|archive_mode) \s* = \s* (?: on|off)/\1 = on/x;
+        s/\A \s* (?: [#] \s* )? wal_level \s* = \s* (?: minimal|archive|hot_standby)/wal_level = hot_standby/x;
+        s/\A \s* (?: [#] \s* )? archive_command \s* = \s* '.*?'/archive_command = '\/bin\/true'/x;
+        s/\A \s* (?: [#] \s* )? (autovacuum_vacuum_threshold|autovacuum_analyze_threshold) \s* = \s* -?\d+/\1 = 500/x;
+        s/\A \s* (?: [#] \s* )? autovacuum_vacuum_scale_factor \s* = \s* \d*\.?\d*/autovacuum_vacuum_scale_factor = 0.1/x;
+        s/\A \s* (?: [#] \s* )? autovacuum_analyze_scale_factor \s* = \s* \d*\.?\d*/autovacuum_analyze_scale_factor = 0.05/x;
+        s/\A \s* (?: [#] \s* )? autovacuum_vacuum_cost_delay \s* = \s* -?\d*\.?\d*(?: ms)?/autovacuum_vacuum_cost_delay = -1/x;
+    " "$work_dir/source/src/backend/utils/misc/postgresql.conf.sample"
+}
+
+configure_sources() {
+    if [[ ! -d "$destination" ]]
+    then
+        mkdir -p "$destination"
+    fi
+
+    tmp_file="$( mktemp -p "$work_dir" )"
+    cd "$work_dir/source"
+
+    echo "+ Configuring PostgreSQL - you can watch progress by tail -f $tmp_file" >&2
+    ./configure \
+        --prefix="${prefix}" \
+        --with-pgport=$( get_port ) \
+        --enable-debug \
+        --enable-integer-datetimes \
+        --enable-thread-safety \
+        --without-krb5 \
+        --without-pam \
+        --with-perl \
+        --with-python \
+        --without-bonjour \
+        --with-openssl \
+        --with-readline \
+        --with-libxml \
+        --with-zlib "${special_configure_options[@]}" >> $tmp_file 2>&1
+    echo "+ Configuring PostgreSQL - done." >&2
+}
+
+compile_sources() {
+    cd "$work_dir/source"
+    call_make "Compiling PostgreSQL base source"
+    cd "$work_dir/source/contrib"
+    call_make "Compiling PostgreSQL contrib modules"
+}
+
+install_binaries() {
+    cd "$work_dir/source"
+    call_make "Installing base binaries" "install"
+    cd "$work_dir/source/contrib"
+    call_make "Installing contrib files" "install"
+}
+
+call_make() {
+    message="$1"
+    level="$2"
+    tmp_file="$( mktemp -p "$work_dir" )"
+    echo "+ $message - you can watch progress by tail -f $tmp_file" >&2
+    $make_program $level >> "$tmp_file" 2>&1
+    echo "+ $message - done." >&2
+}
+
+create_env_script() {
+    printf 'export PATH="%s:$PATH"\n' "${prefix}/bin" > "${prefix}.env"
+    printf 'export LD_LIBRARY_PATH="%s"\n' "${prefix}/lib" >> "${prefix}.env"
+    echo "You can add >> . ${prefix}.env << to your ~/.bashrc or similar file, to have it all set to your paths"
+}
+
+# function definitions #
+
+# main program #
+work_dir="$( mktemp -d -t pgbrew.XXXXXX )"
+trap 'echo; echo "Remember to remove $work_dir everything is ok."; echo' EXIT
+export TMPDIR="$work_dir"
+cd "$work_dir"
+
+# bail on error
+set -e
+
+setup
+get_available_versions
+choose_version
+get_sources
+patch_sources
+configure_sources
+compile_sources
+install_binaries
+create_env_script
+
+echo "All done."
