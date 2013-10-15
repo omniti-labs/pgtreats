@@ -34,6 +34,7 @@
 #include "postgres.h"
 #include "funcapi.h"
 #include "utils/tqual.h"
+#include "utils/rel.h"
 #include "catalog/pg_type.h"
 #include "access/tupconvert.h"
 
