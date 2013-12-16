@@ -1,0 +1,8 @@
+To check for failure you have to load both .sql files to the suspected
+database, and run:
+
+select * from test_correct_relfrozenxid( 'name_of_table_to_check' );
+
+More details in:
+
+http://www.depesz.com/2013/12/06/what-does-fix-vacuums-tests-to-see-whether-it-can-update-relfrozenxid-really-mean/
