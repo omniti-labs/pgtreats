@@ -56,4 +56,6 @@ CONFIGURATION PARAMETERS
 
 **OFFSITEDIR** - the location on the target backup host where the backup files will be stored
 
-
+COPYRIGHT
+-------------------------------------
+The OmniPITR project is Copyright (c) 2009-2013 OmniTI. All rights reserved.
