@@ -1,7 +1,7 @@
 zbackup documentation
 =====================================
 
-This is a bash script to automate the creation of ZFS backups of selective datasets. 
+This is a bash script to automate the creation of ZFS backups of given list of datasets. 
 
 STRUCTURE:
 -------------------------------------
