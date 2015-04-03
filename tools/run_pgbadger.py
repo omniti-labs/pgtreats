@@ -1,4 +1,4 @@
-#!/usr/bin/python2.4
+#!/usr/bin/env python
 
 import argparse, os, os.path, psycopg2, shutil, subprocess, sys, time
 from datetime import date, timedelta
