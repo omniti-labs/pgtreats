@@ -5,7 +5,7 @@ from datetime import date, timedelta
 
 parser = argparse.ArgumentParser(description="This script runs the pg_badger log analysis tool for all databases in a given database. Runs on yesterdays logs.")
 parser.add_argument('-l', '--logdir', required=True, help="Full path to directory where postgresql log files are stored. Required.") 
-parser.add_argument('-c', '--connection', default="host=localhost", help="""Connection string for psycopg. Defaults to "host=localhost".""")
+parser.add_argument('-c', '--connection', default="host=", help="""Connection string for psycopg. Defaults to "host=" (local socket).""")
 parser.add_argument('-d', '--dbname', help="Only run for given database. Otherwise defaults to all databases in the cluster")
 parser.add_argument('-o', '--output', default=os.getcwd(), help="Base directory to create folders for pgbadger output. Each database gets its own subfolder. Default is current location where script is run from.")
 parser.add_argument('-e', '--exclude', action="append", help="Exclude a database. Set multiple times to exclude more than one. By default it already excludes postgres, template0 and template1") 
