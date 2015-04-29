@@ -1,0 +1,4 @@
+default_version = '1.0'
+comment = 'Extension for pre-warming shared buffers according to previous pg_buffercache snapshots for PostgreSQL.'
+requires = 'pg_prewarm,pg_buffercache'
+relocatable = false
