@@ -1,4 +1,4 @@
-pgicozy
+pgcozy
 =========
 
 pgcozy is an extension who adds the capability to keep snapshots of the buffer cache and later can prewarm according to these snapshots.
