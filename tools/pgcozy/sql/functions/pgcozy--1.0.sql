@@ -73,7 +73,7 @@ IF      snapshot_id >0
 	RAISE NOTICE 'Done Warming up snapshot_id -->%', snapshot_id;
 ELSIF   snapshot_id = 0
         THEN
-		RAISE NOTICE 'warming up acording to the latest pgcozy snapshot...';
+		RAISE NOTICE 'warming up according to the latest pgcozy snapshot...';
         FOR v_rec IN
                 select table_name,block_no,popularity
                 from jsonb_populate_recordset( NULL::cozy_type,
