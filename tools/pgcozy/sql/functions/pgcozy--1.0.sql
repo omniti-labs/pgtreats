@@ -7,7 +7,7 @@ IF (select count(*) from pg_extension where extname in ('pg_buffercache','pg_pre
 	create schema pgcozy;
 	create table pgcozy.snapshots (id serial,snapshot_date date, snapshot jsonb);
 	create unique index snapshots_uniq_idx on pgcozy.snapshots (id, snapshot_date);
-	drop type cozy_type;
+	drop type if exists cozy_type;
 	create type cozy_type as (table_name text,block_no int, popularity int);
 	RAISE NOTICE 'Everything is done, check pgcozy schema for more details.';
 ELSE    
