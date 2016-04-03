@@ -15,6 +15,7 @@ args_general.add_argument('-p', '--port', default='5432', help='postgres cluster
 args_general.add_argument('-c', '--config_file', default='/home/postgres/etc/pg_dump.conf', help='file containing contents to dump')
 args_general.add_argument('-ac', '--all_config_file', default='/home/postgres/etc/pg_dumpall.conf', help='file containing name of database used by pg_dumpall and move_all')
 args_general.add_argument('-l', '--lock_file', default='/var/tmp/postgres_dump.lock', help='this file ensures only one backup job runs at a time')
+args_general.add_argument('-v', '--verbose', action='store_true', help='produced log with more information about the execution, helpful for debugging issues')
 
 args_postgres = parser.add_argument_group(title="Postgres options")
 args_postgres.add_argument('-dp', '--pg_dump_path', help='path to pg_dump command')
@@ -63,7 +64,8 @@ def check_lock():
         sys.exit('ERROR: lock file already exists: %s' % lock_file)
     else:
         open(lock_file, 'w+').close()
-        print('Lock file created.')
+        if args.verbose:
+            print('Lock file created.')
 
 
 def take_dump():
@@ -71,11 +73,14 @@ def take_dump():
         with open(config_file, 'r') as f:
             for db in f:
                 if db.strip():
+                    if args.verbose:
+                        print("taking backup of " + db.split()[-1])
                     db = db.replace("\n", "")
                     dump_command = pg_dump_path + " -p " + args.port + " -U postgres -v -Fc -f " + dump_file_path + db.split()[-1] + "_" + start_time  + ".sql" + " " + db + " 2>> " + dump_file_path + db.split()[-1] + "_" + start_time  + ".log"
                     os.system(dump_command)
-                    print('backup of ' + db.split()[-1] + ' completed successfully')
-                    print('dump command : ' + dump_command)
+                    if args.verbose:
+                        print('backup of ' + db.split()[-1] + ' completed successfully')
+                        print('Dump Command: ' + dump_command)
 
     except:
         print('ERROR: bash command did not execute properly')
@@ -83,23 +88,30 @@ def take_dump():
 
 def take_dumpall():
     try:
-           print("Taking globals dump")
+           if args.verbose:
+                print("Taking globals dump")
            dumpall_command = pg_dumpall_path + " -p" + args.port + " -g " + " 1>> " + dump_file_path + args.hostname + "_" + start_time  + "_" + "roles.sql"
-           print(dumpall_command)
            os.system(dumpall_command)
-           print('backup of globals completed successfully')
+           if args.verbose:
+                print("Dumpall Command: " + dumpall_command)
+                print('backup of globals completed successfully')
            if args.gpg:
-                print("Encrypting global file")
+                if args.verbose:
+                    print("Encrypting global file")
                 gpg = gnupg.GPG(gpgbinary=gpg_path, gnupghome=gnupg_dir_path)
                 plain_text_role = open(dump_file_path + args.hostname + "_" + start_time + "_roles.sql", 'rb')
                 encrypted_role = dump_file_path + args.hostname + "_" + start_time + "_roles.sql.gpg"
                 gpg.encrypt_file(plain_text_role, args.recipient, output=encrypted_role)
-                print('backup of globals  encrypted successfully')
+                if args.verbose:
+                    print('backup of globals  encrypted successfully')
            if args.s3 and args.gpg:
-                print('uploading globals to s3')
+                if args.verbose:
+                    print('uploading globals to s3')
                 s3_command = s3_path + " put FILE " + dump_file_path + args.hostname + '_' + start_time + "_roles.sql.gpg " + s3_bucket_link
                 os.system(s3_command)
-                print('backup of globals uploaded successfully')
+                if args.verbose:
+                    print("S3 Upload Command: " + s3_command)
+                    print('backup of globals uploaded successfully')
 
     except:
         print('ERROR: dumpall command did not execute properly')
@@ -112,10 +124,13 @@ def gpg_encrypt():
 
         try:
             for file in upload_files:
+                if args.verbose:
+                    print("encrypting backup of " + file.strip())
                 plain_text_file = open(dump_file_path + file.strip() + "_" + start_time + ".sql", 'rb')
                 encrypted_file = dump_file_path + file.strip() + "_" + start_time + ".sql.gpg"
                 gpg.encrypt_file(plain_text_file, args.recipient, output=encrypted_file)
-                print('backup of ' + file.strip() + ' encrypted successfully')
+                if args.verbose:
+                    print('backup of ' + file.strip() + ' encrypted successfully')
         except:
             print('ERROR: Could not encrypt file')
 
@@ -128,15 +143,20 @@ def s3_upload():
 
     try:
         for file in upload_files:
+            if args.verbose:
+                print("uploading backup of " + file.strip())
             s3_command = s3_path + " put " + dump_file_path + file.strip() + "_" +  start_time + ".sql.gpg " + s3_bucket_link
             os.system(s3_command)
-            print('backup of ' + file.strip() + ' uploaded successfully...')
+            if args.verbose:
+                print("S3 Upload Command: " + s3_command)
+                print('backup of ' + file.strip() + ' uploaded successfully...')
 
     except:
         print('ERROR: s3cmd did not execute successfully')
 
-    list_contents = s3_path + " ls " + s3_bucket_link
-    os.system(list_contents)
+    if args.verbose:
+        list_contents = s3_path + " ls " + s3_bucket_link
+        os.system(list_contents)
 
 
 
@@ -154,12 +174,14 @@ def move_files():
                     if os.path.isfile(os.path.join(dump_file_path, db_file_name)):
                         source = os.path.join(dump_file_path, db_file_name)
                         target = os.path.join(dump_file_path, db_name, db_file_name)
-                        print ("source: " + source + "\n target: " + target)
+                        if args.verbose:
+                            print ("source: " + source + "\n target: " + target)
                         os.rename(source, target)
                     if os.path.isfile(os.path.join(dump_file_path, log_file_name)):
                         source = os.path.join(dump_file_path, log_file_name)
                         target = os.path.join(dump_file_path, db_name, log_file_name)
-                        print ("source: " + source + "\n target: " + target)
+                        if args.verbose:
+                            print ("source: " + source + "\n target: " + target)
                         os.rename(source, target)
 
     except:
@@ -167,17 +189,14 @@ def move_files():
 
 def move_dumpall_files():
     try:
-       with open(all_config_file, 'r') as x:
-           db = x.read()
-           db_name = db.replace('\n','')
-           global_file =  db_name + "_" + start_time + "_roles.sql"
-           if not os.path.exists(os.path.join(dump_file_path, db_name)):
-              os.makedirs(os.path.join(dump_file_path, db_name))
+           global_file =  args.hostname + "_" + start_time + "_roles.sql"
+           if not os.path.exists(os.path.join(dump_file_path, "globals")):
+              os.makedirs(os.path.join(dump_file_path, "globals"))
            if os.path.isfile(os.path.join(dump_file_path, global_file)):
               source = os.path.join(dump_file_path, global_file)
-              print (source) 
-              target = os.path.join(dump_file_path, db_name, global_file)
-              print ("source: " + source + "\n target: " + target)
+              target = os.path.join(dump_file_path, "globals", global_file)
+              if args.verbose:
+                    print ("source: " + source + "\n target: " + target)
               os.rename(source, target)
 
     except:
@@ -192,7 +211,8 @@ def cleanup():
     for f in filelist:
         os.remove(os.path.join(dump_file_path, f))
 
-    print('All cleaned up.')
+    if args.verbose:
+        print('All cleaned up.')
 
 
 check_lock()
