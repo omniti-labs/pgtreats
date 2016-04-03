@@ -11,6 +11,7 @@ parser = argparse.ArgumentParser (description="This program takes a database dum
 
 args_general = parser.add_argument_group(title="General options")
 args_general.add_argument('-n', '--hostname', default=socket.gethostname(), help='name of the machine')
+args_general.add_argument('-p', '--port', default='5432', help='postgres cluster port, defaults to 5432')
 args_general.add_argument('-c', '--config_file', default='/home/postgres/etc/pg_dump.conf', help='file containing contents to dump')
 args_general.add_argument('-ac', '--all_config_file', default='/home/postgres/etc/pg_dumpall.conf', help='file containing name of database used by pg_dumpall and move_all')
 args_general.add_argument('-l', '--lock_file', default='/var/tmp/postgres_dump.lock', help='this file ensures only one backup job runs at a time')
@@ -22,14 +23,14 @@ args_postgres.add_argument('-pp', '--postgres_port', help='port on which the pos
 args_postgres.add_argument('-df', '--dump_file_path', help='The output file to store the pg dump')
 
 args_gpg = parser.add_argument_group(title='GPG options')
-args_gpg.add_argument('--gpg', action='store_true')
+args_gpg.add_argument('--gpg', action='store_true', help='specify this option to encrypt the files')
 args_gpg.add_argument('-gp', '--gpg_path', help='path to gpg binary')
 args_gpg.add_argument('-r', '--recipient', help='recipient\'s key name or email')
 args_gpg.add_argument('-gd', '--gnupg_dir_path', help='path to .gnupg directory')
 args_gpg.add_argument('-gf', '--gpg_encrypt_files', help='comma separated list of database backups to encrypt')
 
 args_s3 = parser.add_argument_group(title='S3 options')
-args_s3.add_argument('--s3', action='store_true')
+args_s3.add_argument('--s3', action='store_true', help='specify this option to upload files to S3. Encryption of files is a prerequisite (see --gpg)')
 args_s3.add_argument('-sp', '--s3_path',  help='path to s3cmd executable')
 args_s3.add_argument('-sf', '--s3_upload_files', help='comma separated list of database backups to upload to S3')
 args_s3.add_argument('-sr', '--s3_upload_role_files', help='comma separated list of database - role backups to upload to S3')
@@ -38,7 +39,7 @@ args_s3.add_argument('-sl', '--s3_bucket_link', help='S3 bucket link on AWS')
 args = parser.parse_args()
 
 if args.s3 and not args.gpg:
-    print("Uploading to S3 without encrypting is not permitted. Please encrypt your files first (see --gpg)")
+    print("ERROR: Uploading to S3 without encrypting is not permitted. Please encrypt your files first (see --gpg)")
     sys.exit(1)
 # Timestamp for backed up filenames
 start_time = time.strftime("%Y-%m-%d_%H:%M:%S")
@@ -71,7 +72,7 @@ def take_dump():
             for db in f:
                 if db.strip():
                     db = db.replace("\n", "")
-                    dump_command = pg_dump_path + " -p 5432 -U postgres -v -Fc -f " + dump_file_path + db.split()[-1] + "_" + start_time  + ".sql" + " " + db + " 2>> " + dump_file_path + db.split()[-1] + "_" + start_time  + ".log"
+                    dump_command = pg_dump_path + " -p " + args.port + " -U postgres -v -Fc -f " + dump_file_path + db.split()[-1] + "_" + start_time  + ".sql" + " " + db + " 2>> " + dump_file_path + db.split()[-1] + "_" + start_time  + ".log"
                     os.system(dump_command)
                     print('backup of ' + db.split()[-1] + ' completed successfully')
                     print('dump command : ' + dump_command)
@@ -86,7 +87,7 @@ def take_dumpall():
            db = x.read()
            db_name = db.replace('\n','')
            print("Taking globals dump")
-           dumpall_command = pg_dumpall_path + " -p5432 -g " + " 1>> " + dump_file_path + db_name + "_" + start_time  + "_" + "roles.sql"
+           dumpall_command = pg_dumpall_path + " -p" + args.port + " -g " + " 1>> " + dump_file_path + db_name + "_" + start_time  + "_" + "roles.sql"
            os.system(dumpall_command)
            print('backup of globals completed successfully')
            if args.gpg:
