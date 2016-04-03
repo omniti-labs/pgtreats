@@ -7,7 +7,19 @@ import os
 import argparse
 import gnupg
 
-parser = argparse.ArgumentParser (description="This program takes a database dump, encrypts and uploads it to S3")
+parser = argparse.ArgumentParser (
+                                    formatter_class=argparse.RawDescriptionHelpFormatter,
+                                    description="This program takes a database dump, encrypts and uploads it to S3",
+                                    epilog='''------
+USAGE:
+------
+    Dump only: python3 ./pg_dump_upload.py -c /etc/pg_dump_upload.conf -dp /usr/bin/pg_dump -da /usr/bin/pg_dumpall -df /data/backups -p 5432
+    Dump with encryption: python3 ./pg_dump_upload.py -c /etc/pg_dump_upload.conf -dp /usr/bin/pg_dump -da /usr/bin/pg_dumpall -df /data/backups -p 5432 \\
+                                    --gpg -gp /usr/bin/gpg -r recipient_name -gd /home/postgres/.gnupg -gf database1,database2...
+    Dump with encryption and upload: python3 ./pg_dump_upload.py -c /etc/pg_dump_upload.conf -dp /usr/bin/pg_dump -da /usr/bin/pg_dumpall -df /data/backups -p 5432 \\
+                                    --gpg -gp /usr/bin/gpg -r recipient_name -gd /home/postgres/.gnupg -gf database1,database2... \\
+                                    --s3 -sp /usr/bin/python26/bin -sf database1, database2... --upload_roles  -sl s3://bucket_name/ --verbose
+                                       ''' )
 
 args_general = parser.add_argument_group(title="General options")
 args_general.add_argument('-n', '--hostname', default=socket.gethostname(), help='name of the machine')
@@ -19,7 +31,6 @@ args_general.add_argument('-v', '--verbose', action='store_true', help='produced
 args_postgres = parser.add_argument_group(title="Postgres options")
 args_postgres.add_argument('-dp', '--pg_dump_path', help='path to pg_dump command')
 args_postgres.add_argument('-da', '--pg_dumpall_path',help='path to pg_dumpall command')
-args_postgres.add_argument('-pp', '--postgres_port', help='port on which the postgres instance is running')
 args_postgres.add_argument('-df', '--dump_file_path', help='The output file to store the pg dump')
 
 args_gpg = parser.add_argument_group(title='GPG options')
@@ -33,7 +44,6 @@ args_s3 = parser.add_argument_group(title='S3 options')
 args_s3.add_argument('--s3', action='store_true', help='specify this option to upload files to S3. Encryption of files is a prerequisite (see --gpg)')
 args_s3.add_argument('-sp', '--s3_path',  help='path to s3cmd executable')
 args_s3.add_argument('-sf', '--s3_upload_files', help='comma separated list of database backups to upload to S3')
-args_s3.add_argument('-sr', '--s3_upload_role_files', help='comma separated list of database - role backups to upload to S3')
 args_s3.add_argument('-sl', '--s3_bucket_link', help='S3 bucket link on AWS')
 
 args = parser.parse_args()
@@ -46,7 +56,6 @@ start_time = time.strftime("%Y-%m-%d_%H:%M:%S")
 
 # Path normalizations and joins
 config_file = os.path.normpath(args.config_file)
-all_config_file = os.path.normpath(args.all_config_file)
 lock_file = os.path.normpath(args.lock_file)
 pg_dump_path = os.path.normpath(args.pg_dump_path)
 pg_dumpall_path = os.path.normpath(args.pg_dumpall_path)
