@@ -22,11 +22,14 @@ args_postgres.add_argument('-pp', '--postgres_port', help='port on which the pos
 args_postgres.add_argument('-df', '--dump_file_path', help='The output file to store the pg dump')
 
 args_gpg = parser.add_argument_group(title='GPG options')
+args_gpg.add_argument('--gpg', action='store_true')
 args_gpg.add_argument('-gp', '--gpg_path', help='path to gpg binary')
 args_gpg.add_argument('-r', '--recipient', help='recipient\'s key name or email')
 args_gpg.add_argument('-gd', '--gnupg_dir_path', help='path to .gnupg directory')
+args_gpg.add_argument('-gf', '--gpg_encrypt_files', help='comma separated list of database backups to encrypt')
 
 args_s3 = parser.add_argument_group(title='S3 options')
+args_s3.add_argument('--s3', action='store_true')
 args_s3.add_argument('-sp', '--s3_path',  help='path to s3cmd executable')
 args_s3.add_argument('-sf', '--s3_upload_files', help='comma separated list of database backups to upload to S3')
 args_s3.add_argument('-sr', '--s3_upload_role_files', help='comma separated list of database - role backups to upload to S3')
@@ -34,6 +37,9 @@ args_s3.add_argument('-sl', '--s3_bucket_link', help='S3 bucket link on AWS')
 
 args = parser.parse_args()
 
+if args.s3 and not args.gpg:
+    print("Uploading to S3 without encrypting is not permitted. Please encrypt your files first (see --gpg)")
+    sys.exit(1)
 # Timestamp for backed up filenames
 start_time = time.strftime("%Y-%m-%d_%H:%M:%S")
 
@@ -44,10 +50,12 @@ lock_file = os.path.normpath(args.lock_file)
 pg_dump_path = os.path.normpath(args.pg_dump_path)
 pg_dumpall_path = os.path.normpath(args.pg_dumpall_path)
 dump_file_path = os.path.join(os.path.normcase(args.dump_file_path), '')
-gpg_path = os.path.normpath(args.gpg_path)
-gnupg_dir_path = os.path.normpath(args.gnupg_dir_path)
-s3_path = os.path.join(os.path.normpath(args.s3_path), "s3cmd")
-s3_bucket_link = os.path.join(args.s3_bucket_link, '')
+if args.gpg:
+    gpg_path = os.path.normpath(args.gpg_path)
+    gnupg_dir_path = os.path.normpath(args.gnupg_dir_path)
+if args.s3:
+    s3_path = os.path.join(os.path.normpath(args.s3_path), "s3cmd")
+    s3_bucket_link = os.path.join(args.s3_bucket_link, '')
 
 def check_lock():
     if os.path.isfile(lock_file):
@@ -81,16 +89,18 @@ def take_dumpall():
            dumpall_command = pg_dumpall_path + " -p5432 -g " + " 1>> " + dump_file_path + db_name + "_" + start_time  + "_" + "roles.sql"
            os.system(dumpall_command)
            print('backup of globals completed successfully')
-           print("Encrypting global file")
-           gpg = gnupg.GPG(gpgbinary=gpg_path, gnupghome=gnupg_dir_path)
-           plain_text_role = open(dump_file_path + db_name + "_" + start_time + "_roles.sql", 'rb')
-           encrypted_role = dump_file_path + db_name + "_" + start_time + "_roles.sql.gpg"
-           gpg.encrypt_file(plain_text_role, args.recipient, output=encrypted_role)
-           print('backup of globals  encrypted successfully')
-           print('uploading globals to s3')
-           s3_command = s3_path + " put FILE " + dump_file_path + db_name + '_' + start_time + "_roles.sql.gpg " + s3_bucket_link
-           os.system(s3_command)
-           print('backup of globals uploaded successfully')
+           if args.gpg:
+                print("Encrypting global file")
+                gpg = gnupg.GPG(gpgbinary=gpg_path, gnupghome=gnupg_dir_path)
+                plain_text_role = open(dump_file_path + db_name + "_" + start_time + "_roles.sql", 'rb')
+                encrypted_role = dump_file_path + db_name + "_" + start_time + "_roles.sql.gpg"
+                gpg.encrypt_file(plain_text_role, args.recipient, output=encrypted_role)
+                print('backup of globals  encrypted successfully')
+           if args.s3 and args.gpg:
+                print('uploading globals to s3')
+                s3_command = s3_path + " put FILE " + dump_file_path + db_name + '_' + start_time + "_roles.sql.gpg " + s3_bucket_link
+                os.system(s3_command)
+                print('backup of globals uploaded successfully')
 
     except:
         print('ERROR: dumpall command did not execute properly')
@@ -98,7 +108,7 @@ def take_dumpall():
 
 def gpg_encrypt():
     try:
-        upload_files = args.s3_upload_files.split(',')
+        upload_files = args.gpg_encrypt_files.split(',')
         gpg = gnupg.GPG(gpgbinary=gpg_path, gnupghome=gnupg_dir_path)
 
         try:
@@ -189,8 +199,10 @@ def cleanup():
 check_lock()
 take_dump()
 take_dumpall()
-gpg_encrypt()
-s3_upload()
+if args.gpg:
+    gpg_encrypt()
+if args.s3 and args.gpg:
+    s3_upload()
 move_files()
 move_dumpall_files()
 cleanup()
