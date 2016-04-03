@@ -13,7 +13,6 @@ args_general = parser.add_argument_group(title="General options")
 args_general.add_argument('-n', '--hostname', default=socket.gethostname(), help='name of the machine')
 args_general.add_argument('-p', '--port', default='5432', help='postgres cluster port, defaults to 5432')
 args_general.add_argument('-c', '--config_file', default='/home/postgres/etc/pg_dump.conf', help='file containing contents to dump')
-args_general.add_argument('-ac', '--all_config_file', default='/home/postgres/etc/pg_dumpall.conf', help='file containing name of database used by pg_dumpall and move_all')
 args_general.add_argument('-l', '--lock_file', default='/var/tmp/postgres_dump.lock', help='this file ensures only one backup job runs at a time')
 args_general.add_argument('-v', '--verbose', action='store_true', help='produced log with more information about the execution, helpful for debugging issues')
 
