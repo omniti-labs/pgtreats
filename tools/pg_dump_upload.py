@@ -83,23 +83,21 @@ def take_dump():
 
 def take_dumpall():
     try:
-       with open(all_config_file, 'r') as x:
-           db = x.read()
-           db_name = db.replace('\n','')
            print("Taking globals dump")
-           dumpall_command = pg_dumpall_path + " -p" + args.port + " -g " + " 1>> " + dump_file_path + db_name + "_" + start_time  + "_" + "roles.sql"
+           dumpall_command = pg_dumpall_path + " -p" + args.port + " -g " + " 1>> " + dump_file_path + args.hostname + "_" + start_time  + "_" + "roles.sql"
+           print(dumpall_command)
            os.system(dumpall_command)
            print('backup of globals completed successfully')
            if args.gpg:
                 print("Encrypting global file")
                 gpg = gnupg.GPG(gpgbinary=gpg_path, gnupghome=gnupg_dir_path)
-                plain_text_role = open(dump_file_path + db_name + "_" + start_time + "_roles.sql", 'rb')
-                encrypted_role = dump_file_path + db_name + "_" + start_time + "_roles.sql.gpg"
+                plain_text_role = open(dump_file_path + args.hostname + "_" + start_time + "_roles.sql", 'rb')
+                encrypted_role = dump_file_path + args.hostname + "_" + start_time + "_roles.sql.gpg"
                 gpg.encrypt_file(plain_text_role, args.recipient, output=encrypted_role)
                 print('backup of globals  encrypted successfully')
            if args.s3 and args.gpg:
                 print('uploading globals to s3')
-                s3_command = s3_path + " put FILE " + dump_file_path + db_name + '_' + start_time + "_roles.sql.gpg " + s3_bucket_link
+                s3_command = s3_path + " put FILE " + dump_file_path + args.hostname + '_' + start_time + "_roles.sql.gpg " + s3_bucket_link
                 os.system(s3_command)
                 print('backup of globals uploaded successfully')
 
@@ -198,8 +196,8 @@ def cleanup():
 
 
 check_lock()
-take_dump()
 take_dumpall()
+take_dump()
 if args.gpg:
     gpg_encrypt()
 if args.s3 and args.gpg:
