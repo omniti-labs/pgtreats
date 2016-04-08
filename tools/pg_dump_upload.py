@@ -139,19 +139,22 @@ def take_dumpall():
                 if args.verbose:
                     print("S3 Upload Command: " + s3_command)
                     print('backup of globals uploaded successfully')
-                if args.cleanup == 'encrypted':
+           if args.cleanup == 'encrypted' and args.gpg:
+                os.remove(encrypted_role)
+                if args.verbose:
+                    print(encrypted_role + " removed from local machine")
+           elif args.cleanup == 'unencrypted':
+                os.remove(global_file_name)
+                if args.verbose:
+                    print(global_file_name + " removed from local machine")
+           elif args.cleanup == 'all':
+                if args.gpg:
                     os.remove(encrypted_role)
-                    if args.verbose:
-                        print("Removed file " + encrypted_role)
-                elif args.cleanup == 'unencrypted':
-                    os.remove(global_file_name)
-                    if args.verbose:
-                        print("Removed file " + global_file_name)
-                elif args.cleanup == 'all':
-                    os.remove(encrypted_role)
-                    os.remove(global_file_name)
-                    if args.verbose:
-                        print("Removed files " + global_file_name + " and " + encrypted_role)
+                os.remove(global_file_name)
+                if args.verbose:
+                    print(global_file_name + " removed from local machine")
+                    if args.gpg:
+                        print(encrypted_role + " removed from local machine")
                 
 
     except:
