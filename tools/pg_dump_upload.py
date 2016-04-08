@@ -86,9 +86,7 @@ def take_dump():
                         print("taking backup of " + db.split()[-1])
                     db = db.replace("\n", "")
                     db_name = db.split()[-1]
-#                    print('db_name: ' + db_name)
                     db_dump_file_name = os.path.join(dump_file_path, db_name, db_name + "_" + start_time + ".sql")
-#                    print('db_dump_file_name: ' + db_dump_file_name)
                     dump_command = pg_dump_path + " -p " + args.port + " -U postgres -v -Fc -f " + db_dump_file_name + " " + db + " 2>> " + os.path.join(dump_file_path, db_name, '') + db_name + "_" + start_time  + ".log"
                     print(dump_command)
                     os.system(dump_command)
@@ -162,11 +160,9 @@ def take_dumpall():
 
 def gpg_encrypt(file_to_encrypt, db_name):
     try:
-#        upload_files = args.gpg_encrypt_files.split(',')
         gpg = gnupg.GPG(gpgbinary=gpg_path, gnupghome=gnupg_dir_path)
 
         try:
-#            for file in upload_files:
                 if args.verbose:
                     print("encrypting " + file_to_encrypt)
                 plain_text_file = open(file_to_encrypt, 'rb')
@@ -189,10 +185,7 @@ def gpg_encrypt(file_to_encrypt, db_name):
 
 
 def s3_upload(file_to_upload):
-#    upload_files = args.s3_upload_files.split(',')
-
     try:
-#        for file in upload_files:
             if args.verbose:
                 print("uploading " + file_to_upload)
             s3_command = s3_path + " put " + file_to_upload + ' ' + s3_bucket_link
@@ -209,69 +202,15 @@ def s3_upload(file_to_upload):
         os.system(list_contents)
 
 
-
-def move_files():
-    try:
-        with open(config_file, 'r') as f:
-            for db in f:
-                if db.strip():
-                    db = db.replace('\n','')
-                    db_name = db.split()[-1]
-                    db_file_name = db_name + "_" + start_time + ".sql"
-                    log_file_name = db_name + "_" + start_time + ".log"
-                    if not os.path.exists(os.path.join(dump_file_path, db_name)):
-                        os.makedirs(os.path.join(dump_file_path, db_name))
-                    if os.path.isfile(os.path.join(dump_file_path, db_file_name)):
-                        source = os.path.join(dump_file_path, db_file_name)
-                        target = os.path.join(dump_file_path, db_name, db_file_name)
-                        if args.verbose:
-                            print ("source: " + source + "\n target: " + target)
-                        os.rename(source, target)
-                    if os.path.isfile(os.path.join(dump_file_path, log_file_name)):
-                        source = os.path.join(dump_file_path, log_file_name)
-                        target = os.path.join(dump_file_path, db_name, log_file_name)
-                        if args.verbose:
-                            print ("source: " + source + "\n target: " + target)
-                        os.rename(source, target)
-
-    except:
-        print("ERROR: Could not move files to specified location")
-
-#def move_dumpall_files():
-#    try:
-#           global_file =  args.hostname + "_" + start_time + "_roles.sql"
-#           if not os.path.exists(os.path.join(dump_file_path, "globals")):
-#              os.makedirs(os.path.join(dump_file_path, "globals"))
-#           if os.path.isfile(os.path.join(dump_file_path, global_file)):
-#              source = os.path.join(dump_file_path, global_file)
-#              target = os.path.join(dump_file_path, "globals", global_file)
-#              if args.verbose:
-#                    print ("source: " + source + "\n target: " + target)
-#              os.rename(source, target)
-#
-#    except:
-#        print("ERROR: Could not move dumpall file to specified location")
-
-
 def cleanup():
     if os.path.exists(lock_file):
         os.remove(lock_file)
-
-#    filelist = [ f for f in os.listdir(dump_file_path) if f.endswith(".sql.gpg") ]
-#    for f in filelist:
-#        os.remove(os.path.join(dump_file_path, f))
 
     if args.verbose:
         print('All cleaned up.')
 
 
-#check_lock()
+check_lock()
 take_dumpall()
 take_dump()
-#if args.gpg:
-#    gpg_encrypt()
-#if args.s3 and args.gpg:
-#    s3_upload()
-#move_files()
-#move_dumpall_files()
 cleanup()
