@@ -33,6 +33,8 @@ args_postgres = parser.add_argument_group(title="Postgres options")
 args_postgres.add_argument('-dp', '--pg_dump_path', help='path to pg_dump command')
 args_postgres.add_argument('-da', '--pg_dumpall_path',help='path to pg_dumpall command')
 args_postgres.add_argument('-df', '--dump_file_path', help='The backup directory to store the pg dump files. The script creates sub directories per database, so only give the parent directory path')
+args_postgres.add_argument('--no_roles', action='store_true', help='exclude backing up roles and globals')
+args_postgres.add_argument('--only_roles', action='store_true', help='only back up roles, no data')
 
 args_gpg = parser.add_argument_group(title='GPG options')
 args_gpg.add_argument('--gpg', action='store_true', help='specify this option to encrypt the files')
@@ -88,7 +90,6 @@ def take_dump():
                     db_name = db.split()[-1]
                     db_dump_file_name = os.path.join(dump_file_path, db_name, db_name + "_" + start_time + ".sql")
                     dump_command = pg_dump_path + " -p " + args.port + " -U postgres -v -Fc -f " + db_dump_file_name + " " + db + " 2>> " + os.path.join(dump_file_path, db_name, '') + db_name + "_" + start_time  + ".log"
-                    print(dump_command)
                     os.system(dump_command)
                     if args.verbose:
                         print('backup of ' + db_name + ' completed successfully')
@@ -109,7 +110,6 @@ def take_dumpall():
         if not os.path.exists(os.path.join(dump_file_path, 'globals')):
             os.makedirs(os.path.join(dump_file_path, 'globals'))
         global_file_path = os.path.join(dump_file_path, 'globals', '')
-        print(global_file_path)
     except:
         print('ERROR: Could not find globals directory. Failed to create. Check permissions')
         sys.exit(1)
@@ -211,6 +211,8 @@ def cleanup():
 
 
 check_lock()
-take_dumpall()
-take_dump()
+if not args.no_roles:
+    take_dumpall()
+if not args.only_roles:
+    take_dump()
 cleanup()
