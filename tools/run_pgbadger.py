@@ -14,7 +14,7 @@ parser.add_argument('-J', '--Jobs', type=int, default=1, help="Use the -J option
 parser.add_argument('--pgbadger', default="pgbadger", help="Location of pgbadger script file. Otherwise assumed in PATH.")
 parser.add_argument('--perl', default="perl", help="Path to desired perl binary location if not in PATH.")
 parser.add_argument('--log_line_prefix', default="""%t [%r] [%p]: [%l-1] user=%u,db=%d,e=%e """, help="""Log line prefix used in log files. Defaults to: "%%t [%%r] [%%p]: [%%l-1] user=%%u,db=%%d,e=%%e ".""")
-parser.add_argument('--exclude_query', help="""any query matching the given regex will be excluded from the report. For example: "^(VACUUM|COMMIT)"""")
+parser.add_argument('--exclude_query', help="""any query matching the given regex will be excluded from the report. For example: "^(VACUUM|COMMIT)".""")
 parser.add_argument('-v', '--verbose', action="store_true", help="Give more verbose output")
 
 parser.add_argument('-a', '--archive', action="store_true", help="""Flag to enable results file archiving. Stores them gzip'd in an folder in the given --output path. Use --archive_time to change default of 30 days and --archive_folder to change the name of the folder used.""")
