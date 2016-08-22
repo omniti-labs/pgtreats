@@ -27,7 +27,7 @@ find "$2" -maxdepth 1 -name "postgresql-${yesterday}*" -exec /opt/OMNIperl/bin/p
     echo "Subject: Pgbadger Report - $yesterday"
     echo
     cat $3/${local_server}_log_report-$yesterday.html| \
-        /home/postgres/bin/pgbadger-report-shrinker.pl
+        /opt/pgtreats/tools/pgbadger-report-shrinker.pl
 ) | /usr/sbin/sendmail -t
 
 # scp file to remote web server
