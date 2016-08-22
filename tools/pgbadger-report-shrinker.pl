@@ -7,7 +7,6 @@ use warnings;
 use warnings qw( FATAL utf8 );
 use utf8;
 use open qw( :std :utf8 );
-use lib '/opt/OMNIperl/lib/vendor_perl/5.16';
 use autodie;
 
 # UTF8 boilerplace, per http://stackoverflow.com/questions/6162484/why-does-modern-perl-avoid-utf-8-by-default/
