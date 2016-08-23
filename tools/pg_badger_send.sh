@@ -18,6 +18,7 @@ $0: [-d <database>] [-l <log_file_directory>] [-o <output_path>] [-s <scp_locati
         -s <scp_location>			optional argument for sending generated report to another machine
         -e <email_address>     			emails address to send the report to
 EOF
+}
 
 # Read commandline parameters
 read_params() {
