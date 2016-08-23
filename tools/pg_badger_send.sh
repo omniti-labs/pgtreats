@@ -63,6 +63,8 @@ read_params() {
     done
 }
 
+read_params "$@"
+
 # Generate the report
 find "${LOG_FILE_PATH}" -maxdepth 1 -name "postgresql-${YESTERDAY}*" -exec /opt/OMNIperl/bin/perl /opt/pgbadger/pgbadger -q -d "${DATABASE}" -o "${DESTINATION}/${LOCAL_SERVER}_log_report-${YESTERDAY}.html" -p '%t [%r] [%p]: [%l-1] user=%u,db=%d,e=%e ' {} +
 
