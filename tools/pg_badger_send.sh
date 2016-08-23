@@ -16,7 +16,7 @@ $0: [-d <database>] [-l <log_file_directory>] [-o <output_path>] [-s <scp_locati
         -l <log_file_directory>			location of postgres log files
         -o <output_path>			location of generated pgbadger reports
         -s <scp_location>			optional argument for sending generated report to another machine
-        -e <email_address>     			emails address to send the report to
+        -e <email_address>     			emails address to send the report to (comma separated list)
 EOF
 }
 
