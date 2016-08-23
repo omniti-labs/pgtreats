@@ -76,7 +76,7 @@ if [ -n "${EMAIL_ADDRESS}" ]; then
         echo "Subject: Pgbadger Report - ${YESTERDAY}"
         echo
         cat ${DESTINATION}/${LOCAL_SERVER}_log_report-${YESTERDAY}.html| \
-            /opt/pgtreats/tools/pgbadger-report-shrinker.pl
+            /opt/OMNIperl/bin/perl /opt/pgtreats/tools/pgbadger-report-shrinker.pl
     ) | /usr/sbin/sendmail -t
 
 fi
