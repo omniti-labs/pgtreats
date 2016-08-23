@@ -66,7 +66,8 @@ read_params() {
 find "${LOG_FILE_PATH}" -maxdepth 1 -name "postgresql-${YESTERDAY}*" -exec /opt/OMNIperl/bin/perl /opt/pgbadger/pgbadger -q -d "${DATABASE}" -o "${DESTINATION}/${LOCAL_SERVER}_log_report-${YESTERDAY}.html" -p '%t [%r] [%p]: [%l-1] user=%u,db=%d,e=%e ' {} +
 
 # Send report to email address
-if [ -n "${EMAIL_ADDRESS}" ]; then
+if [[ -n "${EMAIL_ADDRESS}" ]] 
+then
 
     (
         echo "To: ${EMAIL_ADDRESS}"
@@ -82,7 +83,8 @@ if [ -n "${EMAIL_ADDRESS}" ]; then
 fi
 
 # scp file to remote web server
-if [ -n "${SCP_LOCATION}" ]; then
+if [[ -n "${SCP_LOCATION}" ]]
+then
 
     scp "${DESTINATION}/${LOCAL_SERVER}_log_report-${YESTERDAY}.html" "${SCP_LOCATION}"
 
