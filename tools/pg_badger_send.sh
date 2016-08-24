@@ -77,7 +77,7 @@ then
         echo "MIME-Version: 1.0"
         echo "Content-Type: text/html "
         echo "Content-Disposition: inline"
-        echo "Subject: Pgbadger Report - ${YESTERDAY}"
+        echo "Subject: ${DATABASE} Pgbadger Report - ${YESTERDAY}"
         echo
         cat ${DESTINATION}/${LOCAL_SERVER}_log_report-${YESTERDAY}.html| \
             /opt/OMNIperl/bin/perl /opt/pgtreats/tools/pgbadger-report-shrinker.pl
