@@ -1,0 +1,110 @@
+-- Create table and disable autovacuum
+CREATE TABLE foo (bar bigint, baz text);
+ALTER TABLE foo SET (
+  autovacuum_enabled = false, toast.autovacuum_enabled = false
+);
+-- single row
+INSERT INTO foo VALUES (1, 'Hello world');
+SELECT * FROM pg_dirtyread('foo'::regclass) as t(bar bigint, baz text);
+ bar |     baz     
+-----+-------------
+   1 | Hello world
+(1 row)
+
+DELETE FROM foo;
+SELECT * FROM pg_dirtyread('foo'::regclass) as t(bar bigint, baz text);
+ bar |     baz     
+-----+-------------
+   1 | Hello world
+(1 row)
+
+VACUUM foo;
+-- multiple rows
+INSERT INTO foo VALUES (1, 'Delete'), (2, 'Insert'), (3, 'Update'), (4, 'Not deleted'), (5, 'Not updated');
+DELETE FROM foo WHERE bar = 1;
+UPDATE foo SET baz = 'Updated' WHERE bar = 3;
+BEGIN;
+	DELETE FROM foo WHERE bar = 4;
+	UPDATE foo SET baz = 'Not quite updated' where bar = 5;
+	INSERT INTO foo VALUES (6, 'Not inserted');
+ROLLBACK;
+SELECT * FROM foo;
+ bar |     baz     
+-----+-------------
+   2 | Insert
+   4 | Not deleted
+   5 | Not updated
+   3 | Updated
+(4 rows)
+
+SELECT * FROM pg_dirtyread('foo'::regclass) as t(bar bigint, baz text);
+ bar |        baz        
+-----+-------------------
+   1 | Delete
+   2 | Insert
+   3 | Update
+   4 | Not deleted
+   5 | Not updated
+   3 | Updated
+   5 | Not quite updated
+   6 | Not inserted
+(8 rows)
+
+-- system columns (don't show tableoid and xmin, but make sure they are numbers)
+SELECT CASE WHEN tableoid >= 0 THEN 0 END AS tableoid,
+	ctid,
+	CASE WHEN xmin::text::int >= 0 THEN 0 END AS xmin,
+	CASE WHEN xmax::text <> '0' THEN xmax::text::int - xmin::text::int END AS xmax,
+	cmin, cmax, dead, oid, bar, baz
+	FROM pg_dirtyread('foo'::regclass)
+	AS t(tableoid oid, ctid tid, xmin xid, xmax xid, cmin cid, cmax cid, dead boolean, oid oid, bar bigint, baz text);
+ tableoid | ctid  | xmin | xmax | cmin | cmax | dead | oid | bar |        baz        
+----------+-------+------+------+------+------+------+-----+-----+-------------------
+        0 | (0,1) |    0 |    1 |    0 |    0 | t    |   0 |   1 | Delete
+        0 | (0,2) |    0 |      |    0 |    0 | f    |   0 |   2 | Insert
+        0 | (0,3) |    0 |    2 |    0 |    0 | t    |   0 |   3 | Update
+        0 | (0,4) |    0 |    3 |    0 |    0 | f    |   0 |   4 | Not deleted
+        0 | (0,5) |    0 |    3 |    1 |    1 | f    |   0 |   5 | Not updated
+        0 | (0,6) |    0 |      |    0 |    0 | f    |   0 |   3 | Updated
+        0 | (0,7) |    0 |      |    1 |    1 | t    |   0 |   5 | Not quite updated
+        0 | (0,8) |    0 |      |    2 |    2 | t    |   0 |   6 | Not inserted
+(8 rows)
+
+-- error cases
+SELECT pg_dirtyread('foo'::regclass);
+ERROR:  function returning record called in context that cannot accept type record
+SELECT * FROM pg_dirtyread(0) as t(bar bigint, baz text);
+ERROR:  invalid relation oid "0"
+SELECT * FROM pg_dirtyread('foo'::regclass) as t(bar int, baz text);
+ERROR:  Error converting tuple descriptors!
+DETAIL:  Attribute "bar" has type bigint in corresponding attribute of type foo.
+SELECT * FROM pg_dirtyread('foo'::regclass) as t(moo bigint);
+ERROR:  Error converting tuple descriptors!
+DETAIL:  Attribute "moo" does not exist in type foo.
+SELECT * FROM pg_dirtyread('foo'::regclass) as t(tableoid bigint);
+ERROR:  Error converting tuple descriptors!
+DETAIL:  Attribute "tableoid" has type oid in corresponding attribute of type foo.
+SELECT * FROM pg_dirtyread('foo'::regclass) as t(ctid bigint);
+ERROR:  Error converting tuple descriptors!
+DETAIL:  Attribute "ctid" has type tid in corresponding attribute of type foo.
+SELECT * FROM pg_dirtyread('foo'::regclass) as t(xmin bigint);
+ERROR:  Error converting tuple descriptors!
+DETAIL:  Attribute "xmin" has type xid in corresponding attribute of type foo.
+SELECT * FROM pg_dirtyread('foo'::regclass) as t(xmax bigint);
+ERROR:  Error converting tuple descriptors!
+DETAIL:  Attribute "xmax" has type xid in corresponding attribute of type foo.
+SELECT * FROM pg_dirtyread('foo'::regclass) as t(cmin bigint);
+ERROR:  Error converting tuple descriptors!
+DETAIL:  Attribute "cmin" has type cid in corresponding attribute of type foo.
+SELECT * FROM pg_dirtyread('foo'::regclass) as t(cmax bigint);
+ERROR:  Error converting tuple descriptors!
+DETAIL:  Attribute "cmax" has type cid in corresponding attribute of type foo.
+SELECT * FROM pg_dirtyread('foo'::regclass) as t(dead bigint);
+ERROR:  Error converting tuple descriptors!
+DETAIL:  Attribute "dead" has type boolean in corresponding attribute of type foo.
+SELECT * FROM pg_dirtyread('foo'::regclass) as t(oid bigint);
+ERROR:  Error converting tuple descriptors!
+DETAIL:  Attribute "oid" has type oid in corresponding attribute of type foo.
+SET ROLE luser;
+SELECT * FROM pg_dirtyread('foo'::regclass) as t(bar bigint, baz text);
+ERROR:  must be superuser to use pg_dirtyread
