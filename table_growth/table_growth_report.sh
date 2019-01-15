@@ -15,7 +15,7 @@ psql -d ${DNAME} -c "select 'Top 10 Tables Growth For:-  '||to_char(current_date
 
 if [ -s "$LOGFILE" ]; then
   M_HOSTNAME=$(hostname)'.'$(cat /etc/resolv.conf | grep domain | cut -f2 -d' ')
-  mailx -s "Tablegrowth Monitor Report for ${DNAME} on ${M_HOSTNAME}" dba@omniti.com < $LOGFILE
+  mailx -s "Tablegrowth Monitor Report for ${DNAME} on ${M_HOSTNAME}" dba@credativ.us < $LOGFILE
 fi
 rm $LOGFILE
 exit

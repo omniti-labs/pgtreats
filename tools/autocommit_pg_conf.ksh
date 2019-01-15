@@ -84,4 +84,4 @@ COMMIT="$( svn ci --username $CI_USER -m "Autocommit of change" 2>&1 )"
 echo "# svn diff
 $DIFF
 
-$COMMIT" | mailx -s "PostgreSQL config change on $( uname -n ) in $PG_CONF_DIR" dba@omniti.com
+$COMMIT" | mailx -s "PostgreSQL config change on $( uname -n ) in $PG_CONF_DIR" dba@credativ.us
